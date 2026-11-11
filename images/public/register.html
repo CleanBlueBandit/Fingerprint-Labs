@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register</title>
+    <link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+    <main class="card">
+        <h1>Create an account</h1>
+        <form id="form">
+            <label for="username">Username</label>
+            <input id="username" name="username" type="text" autocomplete="username"
+                   minlength="3" maxlength="20" pattern="[A-Za-z0-9_\-]+" required>
+            <small>3-20 characters: letters, numbers, _ or -</small>
+
+            <label for="password">Password</label>
+            <input id="password" name="password" type="password" autocomplete="new-password"
+                   minlength="8" required>
+            <small>At least 8 characters</small>
+
+            <button type="submit">Register</button>
+            <p id="message" class="message" role="alert"></p>
+        </form>
+        <p class="alt">Already have an account? <a href="/login">Log in</a></p>
+    </main>
+
+    <script src="/src/register.js"></script>
+</body>
+</html>

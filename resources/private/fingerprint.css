@@ -1,0 +1,52 @@
+.fp-card {
+    max-width: 920px;
+}
+
+.fp-warning {
+    margin: 0 0 1rem;
+    padding: 1rem;
+    font: inherit;
+    font-size: 0.9rem;
+    white-space: pre-wrap;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--danger);
+    border-radius: var(--radius);
+}
+
+.fp-check {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 500;
+}
+
+.fp-check input {
+    margin: 0;
+    padding: 0;
+}
+
+.fp-status {
+    min-height: 1.25rem;
+    margin: 0.75rem 0 0;
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.fp-output {
+    margin: 1rem 0 0;
+    padding: 1rem;
+    max-height: 70vh;
+    overflow: auto;
+    font: 0.8rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+.fp-output:empty {
+    display: none;
+}

@@ -1,0 +1,38 @@
+/* Used together with style.css by the error pages (error/errorpage.js). */
+
+.error-page {
+    width: 100%;
+    max-width: 480px;
+    text-align: center;
+}
+
+.error-code {
+    font-size: clamp(4rem, 18vw, 7rem);
+    font-weight: 800;
+    line-height: 1;
+    color: var(--accent);
+}
+
+.error-page h1 {
+    margin: 0.5rem 0;
+    font-size: 1.75rem;
+}
+
+.error-page p {
+    margin: 0 0 1.5rem;
+    color: var(--muted);
+}
+
+.error-actions a.primary {
+    display: inline-block;
+    padding: 0.65rem 1.25rem;
+    font-weight: 600;
+    text-decoration: none;
+    color: #fff;
+    background: var(--accent);
+    border-radius: var(--radius);
+}
+
+.error-actions a.primary:hover {
+    background: var(--accent-hover);
+}

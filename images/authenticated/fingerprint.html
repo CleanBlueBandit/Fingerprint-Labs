@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Browser fingerprint test</title>
+    <link rel="stylesheet" href="/src/style.css">
+    <link rel="stylesheet" href="/src/fingerprint.css">
+</head>
+<body>
+    <main class="card fp-card">
+        <h1>Browser fingerprint test</h1>
+
+        <pre id="warn" class="fp-warning" role="note"></pre>
+
+        <label class="fp-check">
+            <input type="checkbox" id="ok">
+            I understand and agree
+        </label>
+        <label class="fp-check">
+            <input type="checkbox" id="opt-network" checked>
+            Include network data (your IP and headers as seen by this server, plus WebRTC STUN)
+        </label>
+        <label class="fp-check">
+            <input type="checkbox" id="opt-geo">
+            Include precise location (your browser will ask for permission)
+        </label>
+
+        <button id="start" type="button" disabled>Start fingerprint</button>
+        <p id="status" class="fp-status" role="status"></p>
+        <pre id="out" class="fp-output"></pre>
+    </main>
+
+    <script src="/src/fingerprint-lib.js"></script>
+    <script src="/src/fingerprint.js"></script>
+</body>
+</html>
