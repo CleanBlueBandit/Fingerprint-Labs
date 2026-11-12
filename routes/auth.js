@@ -113,6 +113,34 @@ router.post('/login', loginLimiter, async (req, res, next) => {
     }
 });
 
+// Current user for the logged-in session (used by the dashboard)
+router.get('/me', async (req, res, next) => {
+    const notLoggedIn = () => res.status(401).json({ ok: false, message: 'Not logged in' });
+
+    if (!req.session?.userId) return notLoggedIn();
+
+    try {
+        const user = await prisma.user.findUnique({
+            where: { id: req.session.userId },
+            select: { id: true, username: true, createdAt: true }
+        });
+
+        if (!user) {
+            // The account no longer exists, so drop the stale session
+            return req.session.destroy((err) => {
+                if (err) return next(err);
+                res.clearCookie('sid');
+                notLoggedIn();
+            });
+        }
+
+        res.set('Cache-Control', 'no-store');
+        res.json({ ok: true, user });
+    } catch (err) {
+        next(err);
+    }
+});
+
 router.post('/logout', (req, res, next) => {
     req.session.destroy((err) => {
         if (err) return next(err);

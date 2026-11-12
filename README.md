@@ -58,6 +58,10 @@ DATABASE_URL=postgresql://USER:PASSWORD@localhost:5432/DBNAME
 
 # Sessions: use a long random string
 SESSION_SECRET=change-me-to-a-long-random-string
+
+# Optional: terminate TLS in this process so it can compute JA3/JA4 (see "TLS fingerprints")
+# TLS_KEY_FILE=./certs/key.pem
+# TLS_CERT_FILE=./certs/cert.pem
 ```
 
 | Variable | Purpose |
@@ -66,6 +70,7 @@ SESSION_SECRET=change-me-to-a-long-random-string
 | `NODE_ENV` | Set to `production` to enable `secure` cookies (requires HTTPS) |
 | `DATABASE_URL` | Postgres connection string, used by Prisma and the session store |
 | `SESSION_SECRET` | Secret used to sign the session cookie |
+| `TLS_KEY_FILE`, `TLS_CERT_FILE` | Optional. Paths to a PEM private key and certificate. When both are set the server speaks HTTPS itself and fingerprints every TLS handshake (set `PROTOCOL=https` too). Leave unset to serve plain HTTP, for example behind a proxy that terminates TLS. |
 
 Generate a good secret with:
 
@@ -110,8 +115,10 @@ node server.js
 │   └── schema.prisma        # Database schema (User model)
 ├── db/
 │   └── prisma.js            # Shared PrismaClient using the pg driver adapter
+├── lib/
+│   └── tls-fingerprint.js   # TLS ClientHello parser, JA3/JA4, and the TCP wrapper that captures them
 ├── routes/
-│   ├── auth.js              # POST /auth/register, /auth/login, /auth/logout
+│   ├── auth.js              # POST /auth/register, /auth/login, /auth/logout; GET /auth/me
 │   ├── pages.js             # HTML page routes (/, /login, /register, /dashboard, /fingerprint, /coffee)
 │   ├── fingerprint.js       # GET /fingerprint/info: what the server sees about the request
 │   ├── resources.js         # Static assets served under /src
@@ -133,11 +140,11 @@ node server.js
 
 | Method | Path | Auth | Serves |
 |---|---|---|---|
-| GET | `/` | No | `images/public/index.html` |
+| GET | `/` | No | `images/public/index.html` (logged-in users are redirected to `/dashboard`) |
 | GET | `/login` | No | `images/public/login.html` |
 | GET | `/register` | No | `images/public/register.html` |
-| GET | `/dashboard` | Yes | `images/authenticated/dashboard.html` |
-| GET | `/fingerprint` | No | `images/public/fingerprint.html` |
+| GET | `/dashboard` | Yes | `images/authenticated/dashboard.html` (shows the current user from `/auth/me`, links to the fingerprint test, log out button) |
+| GET | `/fingerprint` | Yes | `images/authenticated/fingerprint.html` |
 | GET | `/coffee` | No | 418 "I'm a teapot" error page |
 
 Unauthenticated requests to protected pages are redirected (307) to `/login`.
@@ -151,6 +158,7 @@ All endpoints accept and return JSON in the shape `{ ok: boolean, message: strin
 | POST | `/auth/register` | `{ username, password }` | `201` and a new session | `400` validation, `409` username taken, `429` rate limited |
 | POST | `/auth/login` | `{ username, password }` | `200` and a new session | `401` invalid credentials, `429` rate limited |
 | POST | `/auth/logout` | none | `200`, session destroyed and cookie cleared | none |
+| GET | `/auth/me` | none | `200` with `{ ok: true, user: { id, username, createdAt } }` | `401` not logged in (including when the account no longer exists, in which case the stale session is destroyed) |
 
 **Validation rules**
 
@@ -169,14 +177,29 @@ The response is sent only to the caller and nothing is stored. It contains:
 - `http`: HTTP version, method, protocol, host, hostname, original URL, full path, query, subdomains, `xhr`.
 - `tls`: protocol, cipher, ALPN and server name, only when Node itself terminates TLS (otherwise `null`).
 - `headers`, `headerOrder`, `headerCount`: every header received, plus the original names, casing and order. Credential headers (`authorization`, `proxy-authorization`, `x-api-key`, `x-auth-token`) are redacted and `cookie` is left out.
-- `groups`: the same headers sorted into `proxy`, `clientHints`, `fetchMetadata` and `signals` (DNT, Sec-GPC, Save-Data and similar).
-- `parsed`: `Accept-Language` with q-values, `Accept-Encoding` and `Accept` as lists.
+- `groups`: the same headers sorted into `proxy`, `clientHints`, `preferenceHints` (`Sec-CH-Prefers-*`, a subset of `clientHints`), `fetchMetadata`, `signals` (DNT, Sec-GPC, Save-Data, Priority and similar) and `tlsProxy` (JA3/JA4 headers forwarded by a proxy, see the TLS note below).
+- `parsed`: `Accept-Language` with q-values, `Accept-Encoding` and `Accept` as lists; `acceptDetail` (Accept with q-values) and `acceptRaw`; `doNotTrack` and `globalPrivacyControl`; and `fetchMetadata` (`Sec-Fetch-Site/Mode/Dest/User`).
+- `signature`: short SHA-256 hashes of the header order (as sent and lowercased), `Accept`, `Accept-Encoding` and `Accept-Language`, for comparing the request's shape across runs.
+- `http` also has `versionMajor`/`versionMinor`, `alpnProtocol` (only when Node terminates TLS), `viaHops` (versions reported by proxies in `Via`), `priority` and `connection`. Behind a proxy, `version` is the proxy-to-app hop, not what the browser used.
 - `cookies`: cookie names and the size of the cookie header, never values.
 - `serverTime`: used by the page to estimate clock skew.
 
-The response includes an `Accept-CH` header asking Chromium browsers to send extra client hints (CPU architecture, bitness, full version list, platform version, device memory, and so on) on later requests. This only works on HTTPS or `localhost`, and the browser then keeps sending them to this origin for the session.
+The `/fingerprint` page response and the `/fingerprint/info` response both include an `Accept-CH` header asking Chromium browsers to send extra client hints on later requests (browsers only act on it from page navigations, so the page response is the one that matters): CPU architecture, bitness, full version list, platform version, model, form factors, WoW64, the `Sec-CH-Prefers-*` preferences (colour scheme, reduced motion, reduced transparency, contrast), forced colours, device memory, DPR, viewport and width hints, and the network hints `ECT`, `RTT`, `Downlink` and `Save-Data`. Browsers ignore tokens they don't support. This only works on HTTPS or `localhost`, and the browser then keeps sending them to this origin for the session. The client calls the endpoint a second time when it sees `Accept-CH`, so those headers show up in the result.
 
-Behind a reverse proxy, `trust proxy` in `server.js` is set to `1`, so Express trusts the last `X-Forwarded-For` entry. Without a proxy in front, a client can set that header itself and change `ip.client`; compare it with `ip.socket` to see the real peer.
+**TLS fingerprints (JA3/JA4).** The response has a `tlsFingerprint` object with `source`, `trusted`, `ja3`, `ja3Hash`, `ja4`, `ja4Raw` and a decoded `clientHello` (SNI, ALPN, supported versions, cipher suites, extension order, groups, signature algorithms, whether GREASE and ECH were seen). There are three cases:
+
+1. **Node terminates TLS (`source: "node"`, `trusted: true`).** Node's TLS API doesn't expose the ClientHello, so `lib/tls-fingerprint.js` listens on a plain TCP socket, reads the first TLS record, computes the fingerprints, then replays the bytes to the HTTPS server so the handshake continues normally. Express finds the result by the connection's remote address and port. Enable it by setting `TLS_KEY_FILE` and `TLS_CERT_FILE` and `PROTOCOL=https`. For local testing:
+
+   ```bash
+   mkdir certs && openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/key.pem -out certs/cert.pem \
+     -days 30 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+   ```
+
+   It handles ClientHellos split across several TCP segments, and non-TLS traffic on the TLS port is passed to the HTTPS server, which rejects it as usual. It sees TCP only, so QUIC/HTTP3 handshakes (JA4 `q...`) are not covered, and a ClientHello split across multiple TLS records is not parsed.
+2. **A proxy or CDN terminates TLS (`source: "proxy-headers"`, `trusted: false`).** Node never sees the handshake, so the proxy has to compute JA3/JA4 and forward them as headers. Any of `cf-ja3-hash`, `cf-ja4`, `x-ja3`, `x-ja3-hash`, `x-ja4`, `x-ja4-hash`, `x-tls-ja3`, `x-tls-ja4`, `ssl-ja3` or `x-ssl-ja3` is reported (also under `groups.tlsProxy`). Some CDNs expose JA3/JA4 to their rules or workers, which can copy them into a header; check your provider's docs and make sure it strips these headers from incoming requests, because any client can send them.
+3. **Plain HTTP with nothing forwarded (`source: null`).** `tlsNote` explains why.
+
+JA3 is the MD5 of `version,ciphers,extensions,groups,pointFormats` with GREASE removed. Chromium shuffles the extension order on each connection, so its JA3 changes between connections; JA4 sorts ciphers and extensions, so it stays stable. The JA4 code was checked against the published Chrome values (cipher hash `8daaf6152771`, extension hash `e5627efa2ab1`), and the JA3 code against the JA3 project's sample vector.
 
 ### Static assets
 
@@ -191,11 +214,11 @@ Files under `/src/...` are looked up first in `resources/public/`, then in `reso
 
 `GET /fingerprint` serves a page that collects browser, device and network characteristics and shows them as JSON. Everything is collected in the browser. The server only reports what it sees in the request itself (via `/fingerprint/info`); the collected results are never sent to it and nothing is stored in the database. The request logger in `routes/middleware.js` still prints each request's method, URL and IP to the console, as it does for every route.
 
-- `images/public/fingerprint.html` is the page.
-- `resources/public/fingerprint-lib.js` holds the collectors and exposes `runFingerprint(options)` and `FINGERPRINT_WARNING`.
+- `images/authenticated/fingerprint.html` is the page.
+- `resources/private/fingerprint-lib.js` holds the collectors and exposes `runFingerprint(options)` and `FINGERPRINT_WARNING`.
 - `routes/fingerprint.js` provides `GET /fingerprint/info` (see Fingerprint API above).
-- `resources/public/fingerprint.js` wires the page's checkbox and button to the library.
-- `resources/public/fingerprint.css` adds the layout on top of `style.css`.
+- `resources/private/fingerprint.js` wires the page's checkbox and button to the library.
+- `resources/private/fingerprint.css` adds the layout on top of `style.css`.
 
 `runFingerprint({ consent: true })` throws unless `consent` is exactly `true`, so only pass it after the user has seen `FINGERPRINT_WARNING`. Options:
 
@@ -210,7 +233,27 @@ Files under `/src/...` are looked up first in `resources/public/`, then in `reso
 
 With `network` on, the result has `serverView` (the endpoint's response plus `clientTiming` with round-trip time and estimated clock skew), `webrtcIPs`, and `consistency`, which compares the browser's own claims with what the server received: User-Agent, primary language and language list, client-hint platform, and whether WebRTC's public addresses match the IP the server saw (a mismatch can indicate a VPN or proxy leak).
 
-The page is public. To require login, move `fingerprint.html` into `images/authenticated/` and add `authenticate` to the route in `routes/pages.js`.
+The page and its scripts require login: the route in `routes/pages.js` uses `authenticate`, and the page lives in `images/authenticated/` with its assets in `resources/private/`.
+
+### What gets collected
+
+Beyond the basics (browser, display, canvas, audio, hardware, APIs, WebRTC, WebGL, fonts, plugins, codecs, speech voices, devices, permissions, storage), the result includes:
+
+| Key | What it holds |
+|---|---|
+| `webgpu` | Adapter `info` (vendor, architecture, device, description, subgroup sizes), supported features, every limit, preferred canvas format, WGSL language features, and whether `high-performance` / `low-power` adapters differ from the default. Browsers may hide or normalise these values, so they don't necessarily describe the physical GPU. `{ supported: false }` when WebGPU is missing. |
+| `webgpuRendering` | Renders a 4x MSAA, alpha-blended scene with transcendental maths in the fragment shader into an offscreen texture (no canvas on the page), reads the pixels back and hashes them. Then runs a compute shader of `sin`, `cos`, `exp`, `log`, `pow`, `tanh`, `atan2`, `inverseSqrt` and `fma` and hashes the exact float bits. Also reports any validation error. GPUs, drivers and software rasterizers can differ in blending, MSAA resolve and maths. `{ supported: false }` without WebGPU. |
+| `webgl` / `webgl2` `.shaderPrecision` | `getShaderPrecisionFormat()` for vertex and fragment shaders at low/medium/high float and int precision, each with `rangeMin`, `rangeMax` and `precision`. A fragment `highFloat` precision of 0 means `highp` is unsupported there. |
+| `mediaFeatures` | Display: `color-gamut`, `dynamic-range`, `video-dynamic-range`, `color`, `color-index`, `monochrome`, `update`. Preferences: `prefers-color-scheme`, `prefers-reduced-motion`, `prefers-reduced-transparency`, `prefers-contrast`, `forced-colors`, `inverted-colors`, `prefers-reduced-data`. Input: `pointer`, `any-pointer`, `hover`, `any-hover`, `scripting`. Foldables: `horizontal-viewport-segments`, `vertical-viewport-segments`, `device-posture`. `vendor` holds `-webkit-`, `-moz-` and `-ms-` queries as plain booleans: Chromium doesn't reject unknown vendor queries, so `false` there can mean unsupported. For the other features, `null` means the browser doesn't support the feature, including browsers that parse it but match none of its values (Chromium does this for `inverted-colors`, `prefers-reduced-data` and `video-dynamic-range`). `volatile` (orientation, display mode, overflow, nav controls) depends on window state and is left out of the combined hash. |
+| `cssFeatures` | 169 yes/no probes via `CSS.supports()` and feature detection: properties and values, selectors, at-rules, font technologies and CSS-related APIs, as a count, the list of unsupported items and a bitmap hash. `at-rule()` itself is new, so a blanket "unsupported" for at-rules means the browser can't be asked, not that it lacks them. `computed` holds the number of computed properties, system colour keywords as resolved by the OS and theme, system fonts from the `font` shorthand, default font sizes per generic family (monospace is often 13px) and classic scrollbar size. |
+| `jsEngine` | Experimental. Results of 20 `Math` functions on fixed inputs, floating-point and number-formatting edge cases, typed-array behaviour (endianness, NaN bits, clamping, sort order), sort internals (comparator call order, tie handling), error message text and stack format, feature presence, built-in sizes, and a `hash` of all that. `timing` is noisy and excluded from the hash. Differences can come from the engine, its version, the OS or the CPU, and are not guaranteed to tell devices apart. |
+| `textRendering` | Canvas `measureText()` metrics for 16 fonts and 5 scripts, canvas text feature flags, DOM line boxes with ascent/descent, fractional layout, SVG text metrics, emoji rendering (pixel bounds, colour, hash, ZWJ and skin-tone ligature support), subpixel positioning and LCD anti-aliasing, and a `hash`. |
+
+The old per-query entries (`darkMode`, `reducedMotion`, `reducedTransparency`, `highContrast`, `forcedColors`, `invertedColors`, `colorGamut*`, `hdr` and `standalone`) that were under `prefsAndLocale.preferences`, and the pointer/hover entries under `hardware.touch`, moved into `mediaFeatures` so nothing is collected twice. `prefsAndLocale` now holds only `locale`.
+
+`consistency` also compares the `Sec-CH-UA-Arch`, `Sec-CH-UA-Bitness`, `Sec-CH-UA-Platform-Version` and `Sec-CH-Prefers-Color-Scheme` headers with what the browser reports through JavaScript (`null` when the header wasn't sent).
+
+`combinedHash` covers the device traits that should stay stable between runs, now including `webgpu`, `webgpuRendering` and `cssFeatures` hashes, `mediaFeatures` (minus `volatile`), `jsEngine.hash` and `textRendering.hash`. The TLS fingerprint is not part of it, because it describes the connection rather than the device. Text metrics can shift with browser zoom or font changes, so treat the hash as a similarity aid rather than an identity.
 
 ## Database
 
@@ -242,17 +285,13 @@ On `SIGINT` or `SIGTERM` the server:
 
 If this takes longer than 10 seconds, the process exits with code 1.
 
-## Still To Add
-
-`GET /dashboard` serves `images/authenticated/dashboard.html`, which doesn't exist yet (only a placeholder `index.html` is there). Create it, or point the route in `routes/pages.js` at the page you want logged-in users to land on.
-
 ## Known Quirks
 
 - `db/prisma.js` imports `../generated/prisma/client.ts`, which matches the generator output in `prisma/schema.prisma`. If you change the output path, update the import.
 
 ## Customizing the Template
 
-1. Replace the placeholder pages in `images/public/` and `images/authenticated/`.
+1. Restyle or extend the landing page (`images/public/index.html`) and dashboard (`images/authenticated/dashboard.html`).
 2. Put your CSS, JS and images in `resources/public/` (or the auth-only folder) and reference them with `/src/...`.
 3. Add new routers in `routes/` and mount them in `server.js`.
 4. Extend the Prisma schema, then run `npx prisma migrate dev --config prisma7.config.ts`.

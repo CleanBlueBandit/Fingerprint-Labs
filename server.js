@@ -1,6 +1,8 @@
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import { createServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import 'dotenv/config';
@@ -14,6 +16,7 @@ import fingerprintRouter from './routes/fingerprint.js';
 import srcRouter from './routes/resources.js';
 import { requestLogger } from './routes/middleware.js';
 import prisma from './db/prisma.js';
+import { createTlsFingerprintingServer } from './lib/tls-fingerprint.js';
 
 //#region Setup
 const __filename = fileURLToPath(import.meta.url);
@@ -22,7 +25,18 @@ const __dirname = path.dirname(__filename);
 const app = express();
 
 app.set('trust proxy', 1);
-const httpServer = createServer(app);
+
+// With TLS_KEY_FILE and TLS_CERT_FILE set, this process terminates TLS itself and
+// records a JA3/JA4 fingerprint of every client handshake. Without them it serves
+// plain HTTP, which is what you want behind a proxy that terminates TLS.
+const tlsEnabled = Boolean(process.env.TLS_KEY_FILE && process.env.TLS_CERT_FILE);
+
+const httpServer = tlsEnabled
+    ? createTlsFingerprintingServer(createHttpsServer({
+        key: readFileSync(process.env.TLS_KEY_FILE),
+        cert: readFileSync(process.env.TLS_CERT_FILE)
+    }, app))
+    : createServer(app);
 
 const { Pool } = pg;
 
@@ -127,5 +141,12 @@ const baseUrl =
 
 httpServer.listen(process.env.PORT, () => {
     console.log(`Server listening at ${baseUrl}`);
+
+    if (tlsEnabled) {
+        console.log('TLS enabled: JA3/JA4 fingerprinting is active.');
+        if (process.env.PROTOCOL !== 'https') {
+            console.warn(`PROTOCOL is "${process.env.PROTOCOL}" but TLS is enabled; set PROTOCOL=https.`);
+        }
+    }
 });
 //#endregion

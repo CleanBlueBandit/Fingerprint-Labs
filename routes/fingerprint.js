@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import net from 'node:net';
+import { createHash } from 'node:crypto';
+import { getTlsFingerprint } from '../lib/tls-fingerprint.js';
 import rateLimit from 'express-rate-limit';
 
 const router = Router();
@@ -17,7 +19,9 @@ const limiter = rateLimit({
 
 // Extra client hints the browser is asked to send on later requests
 // (Chromium only, and only on HTTPS or localhost).
-const ACCEPT_CH = [
+// Also sent with the /fingerprint page itself (routes/pages.js): browsers only act on
+// Accept-CH from page navigations, not from fetch() responses.
+export const ACCEPT_CH = [
     'Sec-CH-UA-Arch',
     'Sec-CH-UA-Bitness',
     'Sec-CH-UA-Full-Version-List',
@@ -25,11 +29,24 @@ const ACCEPT_CH = [
     'Sec-CH-UA-Platform-Version',
     'Sec-CH-UA-WoW64',
     'Sec-CH-UA-Form-Factors',
+    'Sec-CH-UA-Full-Version',
     'Sec-CH-Prefers-Color-Scheme',
     'Sec-CH-Prefers-Reduced-Motion',
+    'Sec-CH-Prefers-Reduced-Transparency',
+    'Sec-CH-Prefers-Contrast',
+    'Sec-CH-Forced-Colors',
     'Sec-CH-Device-Memory',
     'Sec-CH-DPR',
     'Sec-CH-Viewport-Width',
+    'Sec-CH-Viewport-Height',
+    'Sec-CH-Width',
+    'Device-Memory',
+    'DPR',
+    'Viewport-Width',
+    'Width',
+    'ECT',
+    'RTT',
+    'Downlink',
     'Save-Data'
 ].join(', ');
 
@@ -65,6 +82,9 @@ const PROXY_HEADERS = new Set([
 const MISC_SIGNAL_HEADERS = new Set([
     'dnt',
     'sec-gpc',
+    'priority',
+    'purpose',
+    'sec-purpose',
     'save-data',
     'upgrade-insecure-requests',
     'device-memory',
@@ -73,6 +93,27 @@ const MISC_SIGNAL_HEADERS = new Set([
     'ect',
     'rtt',
     'downlink'
+]);
+
+// JA3 / JA4 TLS fingerprints are only visible to whatever terminates TLS. If a
+// proxy or CDN computes them and forwards them as headers, they are reported
+// here. They are NOT trustworthy unless your proxy strips these headers from
+// incoming requests first, because any client can send them.
+const TLS_FINGERPRINT_HEADERS = new Set([
+    'cf-ja3-hash',
+    'cf-ja4',
+    'x-ja3',
+    'x-ja3-hash',
+    'x-ja4',
+    'x-ja4-hash',
+    'x-tls-ja3',
+    'x-tls-ja4',
+    'ssl-ja3',
+    'x-ssl-ja3',
+    'x-ssl-protocol',
+    'x-ssl-cipher',
+    'x-tls-version',
+    'x-tls-cipher'
 ]);
 
 // IP classification
@@ -145,10 +186,73 @@ function parseAcceptLanguage(value) {
         .filter((entry) => entry.tag);
 }
 
+// Accept-style headers with q-values, e.g. "text/html,application/xml;q=0.9"
+function parseQList(value) {
+    if (typeof value !== 'string' || !value) return [];
+
+    return value
+        .split(',')
+        .map((part) => {
+            const [token, ...params] = part.trim().split(';');
+            const qParam = params.map((p) => p.trim()).find((p) => p.startsWith('q='));
+            return { value: token.trim(), q: qParam ? Number(qParam.slice(2)) : 1 };
+        })
+        .filter((entry) => entry.value);
+}
+
+// "1.1 proxy-a, 2.0 cloudflare" -> [{ version: '1.1', by: 'proxy-a' }, ...]
+function parseVia(value) {
+    if (typeof value !== 'string' || !value) return [];
+
+    return value
+        .split(',')
+        .map((hop) => hop.trim())
+        .filter(Boolean)
+        .map((hop) => {
+            const [version, ...by] = hop.split(/\s+/);
+            return { version, by: by.join(' ') || null };
+        });
+}
+
+function sha256Short(text) {
+    return createHash('sha256').update(text).digest('hex').slice(0, 32);
+}
+
 function pickHeaders(headers, predicate) {
     return Object.fromEntries(
         Object.entries(headers).filter(([name]) => predicate(name))
     );
+}
+
+function describeTlsFingerprint(socket, headers) {
+    const measured = getTlsFingerprint(socket);
+    if (measured) {
+        return { source: 'node', trusted: true, ...measured };
+    }
+
+    const forwarded = pickHeaders(headers, (name) => TLS_FINGERPRINT_HEADERS.has(name));
+    if (Object.keys(forwarded).length) {
+        return { source: 'proxy-headers', trusted: false, headers: forwarded };
+    }
+
+    return { source: null, trusted: null, ja3: null, ja4: null };
+}
+
+function tlsNoteFor(socket, headers) {
+    if (getTlsFingerprint(socket)) return null;
+
+    if (Object.keys(pickHeaders(headers, (name) => TLS_FINGERPRINT_HEADERS.has(name))).length) {
+        return 'These values were forwarded by a proxy in request headers and are not verified. '
+            + 'Anyone can send the same headers unless the proxy strips them from incoming requests.';
+    }
+
+    if (socket.encrypted) {
+        return 'TLS ends at this server, but this connection\'s handshake was not captured.';
+    }
+
+    return 'Node is not terminating TLS here, so it cannot see the client handshake. '
+        + 'Start it with TLS_KEY_FILE and TLS_CERT_FILE to compute JA3/JA4 itself, '
+        + 'or forward them from your proxy or CDN (see groups.tlsProxy).';
 }
 
 router.get('/info', limiter, (req, res) => {
@@ -197,7 +301,17 @@ router.get('/info', limiter, (req, res) => {
         },
 
         http: {
+            // Protocol of the hop that reached Node. Behind a proxy this is the
+            // proxy-to-app connection, not necessarily what the browser used.
             version: req.httpVersion,
+            versionMajor: req.httpVersionMajor,
+            versionMinor: req.httpVersionMinor,
+            // 'h2' / 'http/1.1' when Node terminates TLS and negotiated ALPN
+            alpnProtocol: socket.encrypted ? (socket.alpnProtocol || null) : null,
+            // HTTP versions of each hop reported by proxies in the Via header
+            viaHops: parseVia(req.headers.via),
+            priority: req.headers.priority ?? null,
+            connection: req.headers.connection ?? null,
             method: req.method,
             protocol: req.protocol,
             secure: req.secure,
@@ -212,6 +326,13 @@ router.get('/info', limiter, (req, res) => {
 
         tls,
 
+        // JA3/JA4 of the TLS handshake. Computed by this server when it terminates TLS
+        // itself (TLS_KEY_FILE and TLS_CERT_FILE set), otherwise whatever a proxy or CDN
+        // in front of it forwards in headers, which can be spoofed unless the proxy
+        // strips those headers from incoming requests.
+        tlsFingerprint: describeTlsFingerprint(socket, headers),
+        tlsNote: tlsNoteFor(socket, headers),
+
         headers,
         headerOrder,
         headerCount: headerOrder.length,
@@ -219,8 +340,22 @@ router.get('/info', limiter, (req, res) => {
         groups: {
             proxy: pickHeaders(headers, (name) => PROXY_HEADERS.has(name)),
             clientHints: pickHeaders(headers, (name) => name.startsWith('sec-ch-')),
+            // Sec-CH-Prefers-* (colour scheme, reduced motion, ...) are a subset of clientHints
+            preferenceHints: pickHeaders(headers, (name) => name.startsWith('sec-ch-prefers-')),
             fetchMetadata: pickHeaders(headers, (name) => name.startsWith('sec-fetch-')),
-            signals: pickHeaders(headers, (name) => MISC_SIGNAL_HEADERS.has(name))
+            signals: pickHeaders(headers, (name) => MISC_SIGNAL_HEADERS.has(name)),
+            // Only populated when a proxy in front of Express computes and forwards them
+            tlsProxy: pickHeaders(headers, (name) => TLS_FINGERPRINT_HEADERS.has(name))
+        },
+
+        // Compact request-shape signature: header names in order, plus the values
+        // of headers that differ between browsers. Compare it across runs.
+        signature: {
+            headerOrderHash: sha256Short(headerOrder.join(',')),
+            headerOrderLowercaseHash: sha256Short(headerOrder.map((h) => h.toLowerCase()).join(',')),
+            acceptHash: sha256Short(String(req.headers.accept ?? '')),
+            acceptEncodingHash: sha256Short(String(req.headers['accept-encoding'] ?? '')),
+            acceptLanguageHash: sha256Short(String(req.headers['accept-language'] ?? ''))
         },
 
         parsed: {
@@ -232,7 +367,21 @@ router.get('/info', limiter, (req, res) => {
             accept: (req.headers.accept || '')
                 .split(',')
                 .map((v) => v.trim())
-                .filter(Boolean)
+                .filter(Boolean),
+            // Same Accept header with q-values, plus the raw string for exact comparison
+            acceptDetail: parseQList(req.headers.accept),
+            acceptRaw: req.headers.accept ?? null,
+            // Do Not Track: '1' = opted out, '0' = opted in, absent = not sent.
+            // Sec-GPC is the newer Global Privacy Control equivalent.
+            doNotTrack: req.headers.dnt ?? null,
+            globalPrivacyControl: req.headers['sec-gpc'] ?? null,
+            // Request context from Fetch Metadata (site, mode, dest, user)
+            fetchMetadata: {
+                site: req.headers['sec-fetch-site'] ?? null,
+                mode: req.headers['sec-fetch-mode'] ?? null,
+                dest: req.headers['sec-fetch-dest'] ?? null,
+                user: req.headers['sec-fetch-user'] ?? null
+            }
         },
 
         cookies: {

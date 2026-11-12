@@ -4,7 +4,13 @@ const FINGERPRINT_WARNING =
 This test collects technical and potentially identifying data from your browser, device and network, including:
   - your public IP address and the request headers your browser sends (as seen by this server)
   - local and public network addresses exposed through WebRTC (via a third-party STUN server)
-  - hardware, GPU, audio, font, display and locale characteristics
+  - hardware, GPU (including WebGPU adapter details), audio, font, display and locale characteristics
+  - CSS media features (colour gamut, HDR, contrast, pointer and hover capabilities)
+  - how your JavaScript engine does maths, sorting and number formatting
+  - how your system renders text and emoji (metrics, anti-aliasing, subpixel positioning)
+  - how your GPU renders a test scene and computes maths (WebGPU, WebGL shader precision)
+  - which CSS features your browser supports, plus system colours, fonts and scrollbar size
+  - when this server terminates TLS itself, the TLS handshake your browser sent (JA3/JA4)
   - installed plugins, connected media devices (types and counts), permission states, storage and battery status
   - optionally, your precise location (only if you opt in AND approve the browser prompt)
 Results are shown in your browser and this script does not store or upload them. The server you are connected to sees your IP address and request headers when you run the test, and the WebRTC test contacts a third-party STUN server.
@@ -44,6 +50,8 @@ async function getDetailedClientHints() {
         "model",
         "platformVersion",
         "fullVersionList",
+        "uaFullVersion",
+        "formFactors",
         "wow64"
     ]);
 }
@@ -253,8 +261,6 @@ async function getAudioFingerprint() {
 
 // hardwareConcurrency, deviceMemory, maxTouchPoints, touch support
 function getHardwareInfo() {
-    const mq = (q) => (window.matchMedia ? window.matchMedia(q).matches : null);
-
     return {
         hardwareConcurrency: navigator.hardwareConcurrency ?? null,
         // Chromium only; capped/bucketed value in GB (0.25 to 8), null elsewhere
@@ -263,12 +269,8 @@ function getHardwareInfo() {
         touch: {
             ontouchstart: "ontouchstart" in window,
             TouchEvent: typeof window.TouchEvent !== "undefined",
-            PointerEvent: typeof window.PointerEvent !== "undefined",
-            pointerCoarse: mq("(pointer: coarse)"),
-            pointerFine: mq("(pointer: fine)"),
-            anyPointerCoarse: mq("(any-pointer: coarse)"),
-            hoverNone: mq("(hover: none)"),
-            anyHover: mq("(any-hover: hover)")
+            PointerEvent: typeof window.PointerEvent !== "undefined"
+            // pointer / hover media features are collected in mediaFeatures
         }
     };
 }
@@ -452,8 +454,24 @@ function getConsistency(result) {
         webrtcPublicMatchesServerIp = rtcPublic.every(a => a === serverIp.address);
     }
 
+    // Client hint headers (sent after Accept-CH) vs what the JS API reports
+    const unq = (v) => (typeof v === "string" ? v.replace(/"/g, "") : null);
+    const ch = result.clientHints || {};
+    const hintMatch = (header, value) =>
+        headers[header] && value !== undefined && value !== null && value !== ""
+            ? unq(headers[header]) === String(value)
+            : null;
+    const mqScheme = window.matchMedia
+        ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+        : null;
+    const schemeHeader = unq(headers["sec-ch-prefers-color-scheme"]);
+
     return {
         userAgentMatches: headers["user-agent"] === navigator.userAgent,
+        clientHintsArchitectureMatches: hintMatch("sec-ch-ua-arch", ch.architecture),
+        clientHintsBitnessMatches: hintMatch("sec-ch-ua-bitness", ch.bitness),
+        clientHintsPlatformVersionMatches: hintMatch("sec-ch-ua-platform-version", ch.platformVersion),
+        prefersColorSchemeMatches: schemeHeader && mqScheme ? schemeHeader === mqScheme : null,
         primaryLanguageMatches: serverLangs.length
             ? serverLangs[0] === (navigator.language || "").toLowerCase()
             : null,
@@ -543,6 +561,31 @@ function getNetworkInfo() {
     };
 }
 
+// getShaderPrecisionFormat() for every shader stage and precision qualifier.
+// precision 0 for highFloat in the fragment stage means highp is not supported there.
+function getShaderPrecision(gl) {
+    const stages = { vertex: gl.VERTEX_SHADER, fragment: gl.FRAGMENT_SHADER };
+    const types = {
+        lowFloat: gl.LOW_FLOAT,
+        mediumFloat: gl.MEDIUM_FLOAT,
+        highFloat: gl.HIGH_FLOAT,
+        lowInt: gl.LOW_INT,
+        mediumInt: gl.MEDIUM_INT,
+        highInt: gl.HIGH_INT
+    };
+    const out = {};
+    for (const [stage, stageConst] of Object.entries(stages)) {
+        out[stage] = {};
+        for (const [name, typeConst] of Object.entries(types)) {
+            const f = gl.getShaderPrecisionFormat(stageConst, typeConst);
+            out[stage][name] = f
+                ? { rangeMin: f.rangeMin, rangeMax: f.rangeMax, precision: f.precision }
+                : null;
+        }
+    }
+    return out;
+}
+
 // GPU / WebGL details (unmasked renderer is very identifying)
 function getWebGLInfo() {
     const out = {};
@@ -569,6 +612,7 @@ function getWebGLInfo() {
             maxFragmentUniformVectors: gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS),
             aliasedLineWidthRange: Array.from(gl.getParameter(gl.ALIASED_LINE_WIDTH_RANGE)),
             aliasedPointSizeRange: Array.from(gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)),
+            shaderPrecision: getShaderPrecision(gl),
             extensions: gl.getSupportedExtensions()
         };
     }
@@ -723,22 +767,10 @@ function getMediaCodecSupport() {
 
 // Display and accessibility preferences + locale/timezone details
 function getPreferencesAndLocale() {
-    const mq = (q) => (window.matchMedia ? window.matchMedia(q).matches : null);
     const dtf = Intl.DateTimeFormat().resolvedOptions();
     const year = new Date().getFullYear();
     return {
-        preferences: {
-            darkMode: mq("(prefers-color-scheme: dark)"),
-            reducedMotion: mq("(prefers-reduced-motion: reduce)"),
-            reducedTransparency: mq("(prefers-reduced-transparency: reduce)"),
-            highContrast: mq("(prefers-contrast: more)"),
-            forcedColors: mq("(forced-colors: active)"),
-            invertedColors: mq("(inverted-colors: inverted)"),
-            colorGamutP3: mq("(color-gamut: p3)"),
-            colorGamutRec2020: mq("(color-gamut: rec2020)"),
-            hdr: mq("(dynamic-range: high)"),
-            standalone: mq("(display-mode: standalone)")
-        },
+        // All media-query based preferences live in mediaFeatures
         locale: {
             locale: dtf.locale,
             calendar: dtf.calendar,
@@ -811,6 +843,1027 @@ function getNavigatorExtras() {
             screenY: window.screenY
         }
     };
+}
+
+// ---------------------------------------------------------------------------
+// G. GPU (WebGPU), media features, JS engine behaviour, text rendering
+// ---------------------------------------------------------------------------
+
+// Shared helpers for the collectors below
+const fmtNum = (v) => (Object.is(v, -0) ? "-0" : String(v));
+
+function withTimeout(promise, ms, label = "operation") {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// Runs fn with an off-screen host element and always removes it afterwards
+function withMeasureHost(fn) {
+    const host = document.createElement("div");
+    host.setAttribute("aria-hidden", "true");
+    host.style.cssText =
+        "position:absolute;left:-10000px;top:0;visibility:hidden;pointer-events:none;white-space:nowrap;";
+    (document.body || document.documentElement).appendChild(host);
+    try {
+        return fn(host);
+    } finally {
+        host.remove();
+    }
+}
+
+// WebGPU adapter details. Browsers may hide, bucket or normalise these, so the
+// values describe what the browser chooses to expose, not necessarily the
+// physical GPU.
+async function getWebGPUInfo() {
+    if (!("gpu" in navigator) || !navigator.gpu) return { supported: false };
+
+    const readAdapter = async (options) => {
+        let adapter;
+        try {
+            adapter = await withTimeout(navigator.gpu.requestAdapter(options), 3000, "requestAdapter");
+        } catch (e) {
+            return { error: String(e) };
+        }
+        if (!adapter) return null;
+
+        // adapter.info in current browsers; requestAdapterInfo() in older ones
+        let info = adapter.info || null;
+        if (!info && typeof adapter.requestAdapterInfo === "function") {
+            try { info = await withTimeout(adapter.requestAdapterInfo(), 2000, "requestAdapterInfo"); }
+            catch (e) { info = null; }
+        }
+
+        const limits = {};
+        // Limits are prototype getters, so for...in is needed to enumerate them
+        for (const key in adapter.limits) {
+            const value = adapter.limits[key];
+            if (typeof value === "number" || typeof value === "bigint") limits[key] = Number(value);
+        }
+
+        return {
+            info: info ? {
+                vendor: info.vendor ?? null,
+                architecture: info.architecture ?? null,
+                device: info.device ?? null,
+                description: info.description ?? null,
+                subgroupMinSize: info.subgroupMinSize ?? null,
+                subgroupMaxSize: info.subgroupMaxSize ?? null,
+                isFallbackAdapter: info.isFallbackAdapter ?? adapter.isFallbackAdapter ?? null
+            } : null,
+            features: Array.from(adapter.features || []).sort(),
+            limits
+        };
+    };
+
+    const out = { supported: true };
+    out.preferredCanvasFormat = (() => {
+        try { return navigator.gpu.getPreferredCanvasFormat(); } catch (e) { return null; }
+    })();
+    out.wgslLanguageFeatures = (() => {
+        try { return Array.from(navigator.gpu.wgslLanguageFeatures || []).sort(); } catch (e) { return null; }
+    })();
+
+    out.default = await readAdapter();
+
+    // Multi-GPU machines can expose different adapters per power preference
+    const defaultJson = JSON.stringify(out.default);
+    out.byPowerPreference = {};
+    for (const pref of ["high-performance", "low-power"]) {
+        const adapter = await readAdapter({ powerPreference: pref });
+        out.byPowerPreference[pref] = JSON.stringify(adapter) === defaultJson
+            ? "same as default"
+            : adapter;
+    }
+
+    return out;
+}
+
+// CSS media features. Returns the matching value (or list of values) for each
+// feature, null when the browser does not support the feature.
+function getMediaFeatures() {
+    if (!window.matchMedia) return null;
+
+    const mm = (q) => { try { return window.matchMedia(q); } catch (e) { return null; } };
+    const valid = (q) => { const m = mm(q); return !!m && m.media !== "not all"; };
+    const matches = (q) => { const m = mm(q); return m ? m.matches : false; };
+
+    // First matching value of a mutually exclusive feature (order matters when one implies another)
+    const one = (feature, values) => {
+        if (!valid(`(${feature})`)) return null;
+        const hit = values.find(v => matches(`(${feature}: ${v})`));
+        // Browsers that parse a feature but don't implement it match none of its
+        // values (seen in Chromium for inverted-colors, prefers-reduced-data and
+        // video-dynamic-range), so that counts as unsupported too
+        return hit ?? null;
+    };
+    // Every matching value (any-pointer, any-hover, color-gamut can match several)
+    const all = (feature, values) => {
+        if (!valid(`(${feature})`)) return null;
+        const hits = values.filter(v => matches(`(${feature}: ${v})`));
+        return hits.length ? hits : null;
+    };
+    // Numeric feature (color bits, color-index entries, monochrome bits) found by binary search
+    const level = (feature, cap) => {
+        const q = (n) => `(min-${feature}: ${n})`;
+        if (!valid(q(0)) || !matches(q(0))) return null;
+        if (matches(q(cap))) return `>=${cap}`;
+        let lo = 0, hi = cap;
+        while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (matches(q(mid))) lo = mid; else hi = mid - 1;
+        }
+        return lo;
+    };
+
+    return {
+        // Display
+        colorGamut: all("color-gamut", ["srgb", "p3", "rec2020"]),
+        dynamicRange: one("dynamic-range", ["high", "standard"]),
+        videoDynamicRange: one("video-dynamic-range", ["high", "standard"]),
+        color: level("color", 32),
+        colorIndex: level("color-index", 256),
+        monochrome: level("monochrome", 32),
+        update: one("update", ["fast", "slow", "none"]),
+
+        // Colour and contrast preferences
+        prefersColorScheme: one("prefers-color-scheme", ["dark", "light"]),
+        prefersReducedMotion: one("prefers-reduced-motion", ["reduce", "no-preference"]),
+        prefersReducedTransparency: one("prefers-reduced-transparency", ["reduce", "no-preference"]),
+        invertedColors: one("inverted-colors", ["inverted", "none"]),
+        prefersContrast: one("prefers-contrast", ["more", "less", "custom", "no-preference"]),
+        forcedColors: one("forced-colors", ["active", "none"]),
+        prefersReducedData: one("prefers-reduced-data", ["reduce", "no-preference"]),
+
+        // Input devices
+        pointer: one("pointer", ["fine", "coarse", "none"]),
+        anyPointer: all("any-pointer", ["fine", "coarse", "none"]),
+        hover: one("hover", ["hover", "none"]),
+        anyHover: all("any-hover", ["hover", "none"]),
+
+        scripting: one("scripting", ["enabled", "initial-only", "none"]),
+
+        // Foldable and dual-screen devices
+        horizontalViewportSegments: level("horizontal-viewport-segments", 8),
+        verticalViewportSegments: level("vertical-viewport-segments", 8),
+        devicePosture: one("device-posture", ["continuous", "folded"]),
+
+        // Vendor-prefixed queries. Chromium doesn't reject unknown vendor queries, so
+        // false can mean "unsupported" as well as "doesn't match".
+        vendor: Object.fromEntries([
+            "(-webkit-transform-3d)", "(-webkit-transform-2d)", "(-webkit-transition)",
+            "(-webkit-animation)", "(-webkit-min-device-pixel-ratio: 0)",
+            "(-webkit-video-playable-inline)", "(-moz-device-pixel-ratio: 0)",
+            "(-moz-touch-enabled)", "(-moz-platform: windows)", "(-moz-platform: macos)",
+            "(-moz-platform: linux)", "(-moz-platform: android)", "(-moz-windows-theme: aero)",
+            "(-moz-mac-graphite-theme)", "(-ms-high-contrast: active)", "(-ms-high-contrast: none)"
+        ].map(q => [q, valid(q) ? matches(q) : null])),
+
+        // Depends on current window state, so excluded from the stable hash
+        volatile: {
+            orientation: one("orientation", ["portrait", "landscape"]),
+            displayMode: one("display-mode", [
+                "fullscreen", "standalone", "minimal-ui", "browser",
+                "picture-in-picture", "window-controls-overlay"
+            ]),
+            overflowBlock: one("overflow-block", ["scroll", "paged", "optional-paged", "none"]),
+            overflowInline: one("overflow-inline", ["scroll", "none"]),
+            navControls: one("nav-controls", ["back", "none"])
+        }
+    };
+}
+
+// JavaScript engine behaviour. Math results, number formatting, typed arrays,
+// sort internals, error text and the set of built-ins differ between engines,
+// engine versions and sometimes CPUs/OSes. Experimental: results are not
+// guaranteed to tell devices apart. Timing is reported separately because it is noisy.
+async function getJsEngineInfo() {
+    // --- Math: results of transcendental functions ---
+    const unary = [
+        "acos", "acosh", "asin", "asinh", "atan", "atanh", "cbrt", "cos", "cosh",
+        "exp", "expm1", "log", "log1p", "log10", "log2", "sin", "sinh", "sqrt", "tan", "tanh"
+    ];
+    const inputs = [0.123456789, 0.5, 1.5, Math.E, 10, 1e-7, 12345.6789, -0.75, 1e10, 1e22];
+    const math = {};
+    for (const name of unary) {
+        math[name] = inputs.map(x => fmtNum(Math[name](x))).join(",");
+    }
+    math.atan2 = [[1, 2], [-3, 0.5], [1e-10, 1e10], [0, -0]]
+        .map(([y, x]) => fmtNum(Math.atan2(y, x))).join(",");
+    math.pow = [[2, 0.5], [Math.E, 10], [10, -5], [0.1, 0.2], [Math.PI, -100], [1.0000001, 1e7]]
+        .map(([b, e]) => fmtNum(Math.pow(b, e))).join(",");
+    math.hypot = [[3, 4], [1e200, 1e200], [0.1, 0.2, 0.3]]
+        .map(a => fmtNum(Math.hypot(...a))).join(",");
+    math.fround = [0.1, 5.05, 1e39, 1.00000001, 16777217]
+        .map(x => fmtNum(Math.fround(x))).join(",");
+
+    // --- Floating point and number formatting ---
+    const float = {
+        add: fmtNum(0.1 + 0.2),
+        mul: fmtNum(0.1 * 3),
+        div: fmtNum(1 / 3),
+        epsilon: fmtNum(Number.EPSILON),
+        maxValue: fmtNum(Number.MAX_VALUE),
+        minValue: fmtNum(Number.MIN_VALUE),
+        denormal: fmtNum(2 ** -1074),
+        roundNegZero: Object.is(Math.round(-0.4), -0),
+        toString2: (0.1).toString(2),
+        toString36: (1 / 3).toString(36),
+        toPrecision21: (123.456).toPrecision(21),
+        toExponential20: (0.000001234).toExponential(20),
+        toFixed20: (1.005).toFixed(20),
+        parseFloatLong: fmtNum(parseFloat("0.1000000000000000055511151231257827")),
+        bigMul: fmtNum(9007199254740993 * 1.1)
+    };
+
+    // --- Typed arrays and binary layout ---
+    const typedArrays = {
+        endianness: new Uint8Array(new Uint16Array([0x0102]).buffer)[0] === 2 ? "little" : "big",
+        float32: Array.from(new Float32Array([0.1, 1 / 3, 1e39, 1e-46, -0, 16777217])).map(fmtNum).join(","),
+        float64NaNBytes: Array.from(new Uint8Array(new Float64Array([NaN]).buffer)).join("."),
+        float32NaNBits: new Uint32Array(new Float32Array([NaN]).buffer)[0].toString(16),
+        clamped: Array.from(new Uint8ClampedArray([0.5, 1.5, 2.5, -3, 300, NaN])).join(","),
+        int8Overflow: Array.from(new Int8Array([128, -129, 255, 1e10])).join(","),
+        float64Sort: Array.from(new Float64Array([3, NaN, -0, 0, -Infinity, 1]).sort()).map(fmtNum).join(","),
+        int32Sort: Array.from(new Int32Array([10, 9, 1, 100, -5]).sort()).join(",")
+    };
+
+    // --- Sorting: algorithm-specific comparator call order and tie handling ---
+    const calls = [];
+    [5, 3, 8, 1, 9, 2, 7, 4, 6, 0, 15, 11, 13, 12, 14, 10].sort((a, b) => {
+        calls.push(`${a}>${b}`);
+        return a - b;
+    });
+    const stable = (() => {
+        const items = Array.from({ length: 200 }, (_, i) => ({ k: i % 3, i }));
+        items.sort((a, b) => a.k - b.k);
+        return items.every((x, idx, arr) => idx === 0 || arr[idx - 1].k < x.k || arr[idx - 1].i < x.i);
+    })();
+    const sorting = {
+        comparatorCalls: calls.length,
+        comparatorOrderHash: (await hashString(calls.join(" "))).value.slice(0, 16),
+        inconsistentComparator: Array.from({ length: 25 }, (_, i) => i)
+            .sort((a, b) => (a % 4) - (b % 3)).join(","),
+        defaultMixedSort: [10, 9, 1, undefined, null, "b", "a", NaN, -1].sort().map(String).join(","),
+        sparseSort: (() => { const a = [, 1, , 0]; a.sort(); return `${a.length}:${Object.keys(a).join("|")}`; })(),
+        stable
+    };
+
+    // --- Error messages and stack format differ per engine ---
+    const msg = (fn) => {
+        try { fn(); return null; } catch (e) { return `${e.name}: ${e.message}`; }
+    };
+    const stack = (() => { try { return String(new Error("x").stack || ""); } catch (e) { return ""; } })();
+    const errors = {
+        nullProperty: msg(() => { const n = null; return n.x; }),
+        undeclaredCall: msg(() => { /* eslint-disable-next-line no-undef */ undeclaredFunctionFp(); }),
+        negativeArray: msg(() => new Array(-1)),
+        badJson: msg(() => JSON.parse("{bad")),
+        toFixedRange: msg(() => (1).toFixed(101)),
+        badRegex: msg(() => new RegExp("[")),
+        stackStyle: /^\s+at /m.test(stack) ? "at-lines" : (stack.includes("@") ? "at-sign" : "other"),
+        captureStackTrace: typeof Error.captureStackTrace,
+        stackTraceLimit: typeof Error.stackTraceLimit === "number" ? Error.stackTraceLimit : null
+    };
+
+    // --- Which language/runtime features exist (varies by engine version) ---
+    const has = (fn) => { try { return !!fn(); } catch (e) { return false; } };
+    const features = {
+        arrayToSorted: has(() => typeof [].toSorted === "function"),
+        arrayFindLast: has(() => typeof [].findLast === "function"),
+        arrayFromAsync: has(() => typeof Array.fromAsync === "function"),
+        objectGroupBy: has(() => typeof Object.groupBy === "function"),
+        promiseWithResolvers: has(() => typeof Promise.withResolvers === "function"),
+        setUnion: has(() => typeof Set.prototype.union === "function"),
+        iteratorHelpers: has(() => typeof Iterator !== "undefined" && typeof Iterator.prototype.map === "function"),
+        stringIsWellFormed: has(() => typeof "".isWellFormed === "function"),
+        regexpVFlag: has(() => new RegExp("", "v")),
+        intlSegmenter: has(() => typeof Intl.Segmenter === "function"),
+        temporal: has(() => typeof Temporal !== "undefined"),
+        float16Array: has(() => typeof Float16Array !== "undefined"),
+        mathF16round: has(() => typeof Math.f16round === "function"),
+        sharedArrayBuffer: has(() => typeof SharedArrayBuffer !== "undefined"),
+        atomicsWaitAsync: has(() => typeof Atomics !== "undefined" && typeof Atomics.waitAsync === "function"),
+        resizableArrayBuffer: has(() => "resizable" in ArrayBuffer.prototype),
+        weakRef: has(() => typeof WeakRef !== "undefined"),
+        bigInt64Array: has(() => typeof BigInt64Array !== "undefined")
+    };
+
+    // --- Size and shape of built-ins, and native function source text ---
+    const builtinsShape = {
+        math: Object.getOwnPropertyNames(Math).length,
+        arrayPrototype: Object.getOwnPropertyNames(Array.prototype).length,
+        stringPrototype: Object.getOwnPropertyNames(String.prototype).length,
+        objectStatic: Object.getOwnPropertyNames(Object).length,
+        reflect: Object.getOwnPropertyNames(Reflect).length,
+        number: Object.getOwnPropertyNames(Number).length,
+        intl: Object.getOwnPropertyNames(Intl).length,
+        nativeFunctionText: String(Math.sin),
+        evalSourceLength: String(eval).length
+    };
+
+    // Deterministic part is hashed; timing is not included because it is noisy
+    const hash = await hashString(JSON.stringify({ math, float, typedArrays, sorting, errors, features, builtinsShape }));
+
+    const t0 = performance.now();
+    let acc = 0;
+    for (let i = 0; i < 200000; i++) acc += Math.sin(i) * Math.cos(i);
+    const mathLoopMs = performance.now() - t0;
+
+    return {
+        hashAlgorithm: hash.algorithm,
+        hash: hash.value,
+        math, float, typedArrays, sorting, errors, features, builtinsShape,
+        timing: {
+            noisy: true,
+            note: "Excluded from the combined hash. Depends on CPU load and timer precision.",
+            mathLoopMs: Number(mathLoopMs.toFixed(2)),
+            sink: acc === 123.456
+        }
+    };
+}
+
+// Text rendering: canvas metrics, DOM boxes, SVG text, emoji and subpixel behaviour.
+// Font availability and actual rendering are different things, so this measures
+// what the engine does with text rather than just which fonts exist.
+const TEXT_SAMPLES = {
+    latin: "mmmmmmmmmmlli WwQ@#0123456789",
+    pangram: "Cwm fjord bank glyphs vext quiz",
+    cjk: "日本語の文字中文한국어",
+    arabic: "مرحبا بالعالم",
+    emoji: "😀🫠🧑‍🚀🏳️‍🌈👍🏽"
+};
+const TEXT_FONTS = [
+    "monospace", "sans-serif", "serif", "system-ui", "cursive", "fantasy",
+    "Arial", "Times New Roman", "Courier New", "Segoe UI", "Helvetica Neue",
+    "Noto Sans", "Roboto", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji"
+];
+const GENERIC_FAMILIES = ["monospace", "sans-serif", "serif", "system-ui", "cursive", "fantasy"];
+const EMOJI_STACK = '"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif';
+
+async function getTextRenderingInfo() {
+    const r4 = (n) => (typeof n === "number" && Number.isFinite(n) ? Number(n.toFixed(4)) : null);
+    const part = async (fn) => { try { return await fn(); } catch (e) { return { error: String(e) }; } };
+
+    // Canvas measureText(): advance width plus bounding boxes and font ascent/descent
+    const canvasMetrics = await part(() => {
+        const ctx = document.createElement("canvas").getContext("2d");
+        const out = {};
+        for (const font of TEXT_FONTS) {
+            out[font] = {};
+            // Generic families must not be quoted; named fonts fall back to sans-serif
+            ctx.font = GENERIC_FAMILIES.includes(font)
+                ? `72px ${font}`
+                : `72px "${font}", sans-serif`;
+            for (const [name, text] of Object.entries(TEXT_SAMPLES)) {
+                const m = ctx.measureText(text);
+                // width, bbox left/right/ascent/descent, font ascent/descent
+                out[font][name] = [
+                    m.width, m.actualBoundingBoxLeft, m.actualBoundingBoxRight,
+                    m.actualBoundingBoxAscent, m.actualBoundingBoxDescent,
+                    m.fontBoundingBoxAscent, m.fontBoundingBoxDescent
+                ].map(r4).join(",");
+            }
+        }
+        out._columns = "width,bboxLeft,bboxRight,bboxAscent,bboxDescent,fontAscent,fontDescent";
+        return out;
+    });
+
+    // Which canvas text properties this browser implements
+    const canvasTextFeatures = await part(() => {
+        const ctx = document.createElement("canvas").getContext("2d");
+        return {
+            letterSpacing: "letterSpacing" in ctx,
+            wordSpacing: "wordSpacing" in ctx,
+            fontKerning: "fontKerning" in ctx,
+            fontStretch: "fontStretch" in ctx,
+            fontVariantCaps: "fontVariantCaps" in ctx,
+            textRendering: "textRendering" in ctx,
+            textAlign: ctx.textAlign,
+            textBaseline: ctx.textBaseline,
+            direction: ctx.direction,
+            defaultFont: ctx.font
+        };
+    });
+
+    // DOM layout: line box, ascent/descent via a baseline probe, fractional widths
+    const dom = await part(() => withMeasureHost((host) => {
+        const out = { fonts: {} };
+        for (const font of ["monospace", "sans-serif", "serif", "system-ui", "Arial", "Times New Roman", "Courier New"]) {
+            const family = GENERIC_FAMILIES.includes(font) ? font : `"${font}", sans-serif`;
+            const span = document.createElement("span");
+            span.style.cssText = `font:100px/normal ${family};`;
+            span.textContent = "Hxgjpq|";
+            const probe = document.createElement("span");
+            probe.style.cssText = "display:inline-block;width:0;height:0;";
+            span.appendChild(probe);
+            host.appendChild(span);
+            const s = span.getBoundingClientRect();
+            const p = probe.getBoundingClientRect();
+            const ascent = p.top - s.top; // probe sits on the baseline
+            out.fonts[font] = {
+                width: r4(s.width),
+                height: r4(s.height),
+                ascent: r4(ascent),
+                descent: r4(s.height - ascent)
+            };
+        }
+
+        // Fractional text widths, and whole-string width vs sum of single characters
+        const frac = document.createElement("span");
+        frac.style.cssText = "font:13.37px sans-serif;letter-spacing:0.1px;";
+        frac.textContent = TEXT_SAMPLES.latin;
+        host.appendChild(frac);
+        const fw = frac.getBoundingClientRect().width;
+
+        const whole = document.createElement("span");
+        whole.style.cssText = "font:11px sans-serif;";
+        whole.textContent = "iiiiiiiiiiWWWWWWWWWW";
+        host.appendChild(whole);
+        let perChar = 0;
+        for (const ch of "iiiiiiiiiiWWWWWWWWWW") {
+            const c = document.createElement("span");
+            c.style.cssText = "font:11px sans-serif;display:inline-block;";
+            c.textContent = ch;
+            host.appendChild(c);
+            perChar += c.getBoundingClientRect().width;
+        }
+        out.fractionalWidth = r4(fw);
+        out.fractionalLayout = Math.abs(fw - Math.round(fw)) > 0.001;
+        out.wholeStringWidth = r4(whole.getBoundingClientRect().width);
+        out.sumOfCharacterWidths = r4(perChar);
+
+        // Range boxes for emoji and mixed-script text
+        try {
+            out.ranges = {};
+            for (const [name, text] of Object.entries(TEXT_SAMPLES)) {
+                const el = document.createElement("span");
+                el.style.cssText = `font:32px ${EMOJI_STACK};`;
+                el.textContent = text;
+                host.appendChild(el);
+                const range = document.createRange();
+                range.selectNodeContents(el);
+                const b = range.getBoundingClientRect();
+                out.ranges[name] = `${r4(b.width)}x${r4(b.height)} rects=${range.getClientRects().length}`;
+            }
+        } catch (e) {
+            out.ranges = { error: String(e) };
+        }
+        return out;
+    }));
+
+    // SVG text metrics
+    const svg = await part(() => withMeasureHost((host) => {
+        const NS = "http://www.w3.org/2000/svg";
+        const root = document.createElementNS(NS, "svg");
+        root.setAttribute("width", "600");
+        root.setAttribute("height", "200");
+        host.appendChild(root);
+        const out = {};
+        for (const font of ["monospace", "sans-serif", "serif", "Arial", "Times New Roman"]) {
+            const t = document.createElementNS(NS, "text");
+            t.setAttribute("x", "10");
+            t.setAttribute("y", "60");
+            t.setAttribute("font-size", "48");
+            t.setAttribute("font-family", font);
+            t.textContent = "Fingerprint Wjg";
+            root.appendChild(t);
+            const b = t.getBBox();
+            out[font] = {
+                bbox: [b.x, b.y, b.width, b.height].map(r4).join(","),
+                computedTextLength: r4(t.getComputedTextLength()),
+                subStringLength: r4(t.getSubStringLength(0, 5)),
+                chars: t.getNumberOfChars(),
+                secondCharStart: (() => { const p = t.getStartPositionOfChar(1); return `${r4(p.x)},${r4(p.y)}`; })(),
+                firstCharExtent: (() => { const e = t.getExtentOfChar(0); return [e.x, e.y, e.width, e.height].map(r4).join(","); })()
+            };
+        }
+        return out;
+    }));
+
+    // Emoji: rendered pixel bounds, colour, hash, and ZWJ/modifier ligature support
+    const emoji = await part(async () => {
+        const samples = ["😀", "🫠", "🫨", "🫩", "🧑‍🚀", "🏳️‍🌈", "🇬🇪", "👍🏽"];
+        const canvas = document.createElement("canvas");
+        canvas.width = 96;
+        canvas.height = 64;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        const out = { glyphs: {} };
+        for (const e of samples) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.font = `40px ${EMOJI_STACK}`;
+            ctx.textBaseline = "top";
+            ctx.fillText(e, 4, 4);
+            const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            let minX = width, minY = height, maxX = -1, maxY = -1, colorful = false;
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const i = (y * width + x) * 4;
+                    if (data[i + 3] === 0) continue;
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                    const hi = Math.max(data[i], data[i + 1], data[i + 2]);
+                    const lo = Math.min(data[i], data[i + 1], data[i + 2]);
+                    if (hi - lo > 24) colorful = true;
+                }
+            }
+            const hash = await hashString(canvas.toDataURL());
+            out.glyphs[e] = {
+                width: r4(ctx.measureText(e).width),
+                drawnBounds: maxX < 0 ? null : `${maxX - minX + 1}x${maxY - minY + 1}`,
+                colorful,
+                hash: hash.value.slice(0, 16)
+            };
+        }
+        const w = (s) => ctx.measureText(s).width;
+        ctx.font = `40px ${EMOJI_STACK}`;
+        out.zwjLigatures = {
+            astronaut: w("🧑‍🚀") < w("🧑") + w("🚀") - 0.5,
+            rainbowFlag: w("🏳️‍🌈") < w("🏳") + w("🌈") - 0.5,
+            skinToneModifier: w("👍🏽") < w("👍") + w("🏽") - 0.5
+        };
+        return out;
+    });
+
+    // Subpixel positioning and anti-aliasing mode
+    const subpixel = await part(async () => {
+        const hashes = [];
+        for (const dx of [0, 0.25, 0.5, 0.75]) {
+            const c = document.createElement("canvas");
+            c.width = 160;
+            c.height = 30;
+            const ctx = c.getContext("2d");
+            ctx.font = "15px sans-serif";
+            ctx.fillText("Subpixel text", 4 + dx, 20);
+            hashes.push((await hashString(c.toDataURL())).value.slice(0, 12));
+        }
+
+        // Opaque canvas with black-on-white text: coloured fringes mean LCD anti-aliasing
+        const lc = document.createElement("canvas");
+        lc.width = 160;
+        lc.height = 40;
+        const lctx = lc.getContext("2d", { alpha: false, willReadFrequently: true });
+        lctx.fillStyle = "#fff";
+        lctx.fillRect(0, 0, lc.width, lc.height);
+        lctx.fillStyle = "#000";
+        lctx.font = "20px sans-serif";
+        lctx.fillText("Subpixel LCD", 4, 28);
+        const px = lctx.getImageData(0, 0, lc.width, lc.height).data;
+        let coloured = false;
+        for (let i = 0; i < px.length; i += 4) {
+            if (px[i] !== px[i + 1] || px[i + 1] !== px[i + 2]) { coloured = true; break; }
+        }
+
+        return {
+            canvasOffsetHashes: hashes,
+            distinctRenderings: new Set(hashes).size,
+            canvasSubpixelPositioning: new Set(hashes).size > 1,
+            lcdAntialiasing: coloured
+        };
+    });
+
+    const hash = await hashString(JSON.stringify({ canvasMetrics, canvasTextFeatures, dom, svg, emoji, subpixel }));
+
+    return {
+        hashAlgorithm: hash.algorithm,
+        hash: hash.value,
+        canvasMetrics, canvasTextFeatures, dom, svg, emoji, subpixel
+    };
+}
+
+// ---------------------------------------------------------------------------
+// H. WebGPU rendering, CSS feature support
+// ---------------------------------------------------------------------------
+
+// SHA-256 of raw bytes (falls back to cyrb53 where crypto.subtle is unavailable)
+async function hashBytes(bytes) {
+    if (window.crypto && crypto.subtle) {
+        const buf = await crypto.subtle.digest("SHA-256", bytes);
+        return {
+            algorithm: "SHA-256",
+            value: Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("")
+        };
+    }
+    let s = "";
+    for (let i = 0; i < bytes.length; i += 8192) {
+        s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+    }
+    return { algorithm: "cyrb53", value: cyrb53(s) };
+}
+
+const WEBGPU_RENDER_SHADER = `
+struct VOut {
+    @builtin(position) pos: vec4f,
+    @location(0) uv: vec2f,
+    @location(1) col: vec3f,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> VOut {
+    var p = array<vec2f, 6>(
+        vec2f(-0.9, -0.8), vec2f(0.8, -0.9), vec2f(0.1, 0.9),
+        vec2f(-0.7, 0.6), vec2f(0.9, 0.2), vec2f(0.3, -0.7)
+    );
+    var c = array<vec3f, 6>(
+        vec3f(1.0, 0.2, 0.1), vec3f(0.1, 0.9, 0.3), vec3f(0.2, 0.3, 1.0),
+        vec3f(0.9, 0.8, 0.1), vec3f(0.6, 0.1, 0.9), vec3f(0.1, 0.8, 0.8)
+    );
+    var o: VOut;
+    o.pos = vec4f(p[i], 0.0, 1.0);
+    o.uv = p[i];
+    o.col = c[i];
+    return o;
+}
+
+@fragment
+fn fs(in: VOut) -> @location(0) vec4f {
+    let t = in.uv * 23.0;
+    // Transcendental functions: results can differ slightly between GPUs and drivers
+    let w = sin(t.x) * cos(t.y)
+        + exp(-dot(in.uv, in.uv) * 3.0)
+        + pow(abs(in.uv.x) + 0.1, 2.2)
+        + tanh(t.x * 0.1)
+        + atan2(in.uv.y, in.uv.x + 0.5)
+        + log(1.5 + in.uv.y);
+    let n = fract(sin(dot(in.uv, vec2f(12.9898, 78.233))) * 43758.5453);
+    let c = in.col * (0.55 + 0.45 * sin(w * 3.0)) + vec3f(n * 0.08);
+    return vec4f(c, 0.85);
+}
+`;
+
+const WEBGPU_COMPUTE_SHADER = `
+@group(0) @binding(0) var<storage, read_write> out: array<f32>;
+
+@compute @workgroup_size(16)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+    let i = id.x;
+    let k = i / 16u;
+    let x = f32(i % 16u) * 0.731 + 0.123;
+    var r = 0.0;
+    if (k == 0u) { r = sin(x * 10.0); }
+    else if (k == 1u) { r = cos(x * 10.0); }
+    else if (k == 2u) { r = exp(x); }
+    else if (k == 3u) { r = log(x); }
+    else if (k == 4u) { r = pow(x, 1.7); }
+    else if (k == 5u) { r = tanh(x); }
+    else if (k == 6u) { r = atan2(x, 0.5 + x * 0.1); }
+    else { r = inverseSqrt(x) + fma(x, x, 0.1); }
+    out[i] = r;
+}
+`;
+
+// Draws a 4x MSAA scene to an offscreen texture, reads the pixels back and hashes
+// them, then runs a compute shader of math functions and hashes its float bits.
+// No canvas is attached to the page. Different GPUs, drivers and software
+// rasterizers can differ in blending, MSAA resolve and transcendental maths.
+async function getWebGPURendering() {
+    if (!("gpu" in navigator) || !navigator.gpu) return { supported: false };
+
+    let device = null;
+    try {
+        const adapter = await withTimeout(navigator.gpu.requestAdapter(), 3000, "requestAdapter");
+        if (!adapter) return { supported: true, adapter: null };
+        device = await withTimeout(adapter.requestDevice(), 3000, "requestDevice");
+
+        device.pushErrorScope("validation");
+        const out = { supported: true };
+        out.render = await part(() => renderWebGPUScene(device));
+        out.compute = await part(() => computeWebGPUMath(device));
+        const err = await device.popErrorScope();
+        out.validationError = err ? err.message : null;
+
+        const hash = await hashString(JSON.stringify({
+            render: out.render && out.render.hash,
+            compute: out.compute && out.compute.hash
+        }));
+        out.hashAlgorithm = hash.algorithm;
+        out.hash = hash.value;
+        return out;
+    } catch (e) {
+        return { supported: true, error: String(e) };
+    } finally {
+        try { if (device) device.destroy(); } catch (e) { /* ignore */ }
+    }
+
+    async function part(fn) {
+        try { return await fn(); } catch (e) { return { error: String(e) }; }
+    }
+}
+
+async function renderWebGPUScene(device) {
+    const W = 128, H = 128, SAMPLES = 4, FORMAT = "rgba8unorm";
+    const module = device.createShaderModule({ code: WEBGPU_RENDER_SHADER });
+    const pipeline = device.createRenderPipeline({
+        layout: "auto",
+        vertex: { module, entryPoint: "vs" },
+        fragment: {
+            module,
+            entryPoint: "fs",
+            targets: [{
+                format: FORMAT,
+                blend: {
+                    color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha" },
+                    alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha" }
+                }
+            }]
+        },
+        primitive: { topology: "triangle-list" },
+        multisample: { count: SAMPLES }
+    });
+
+    const msaa = device.createTexture({
+        size: [W, H], format: FORMAT, sampleCount: SAMPLES,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT
+    });
+    const resolve = device.createTexture({
+        size: [W, H], format: FORMAT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+    });
+    const readback = device.createBuffer({
+        size: W * H * 4, // W * 4 = 512 bytes per row, a multiple of the required 256
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
+
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({
+        colorAttachments: [{
+            view: msaa.createView(),
+            resolveTarget: resolve.createView(),
+            clearValue: { r: 0.1, g: 0.2, b: 0.3, a: 1 },
+            loadOp: "clear",
+            storeOp: "discard"
+        }]
+    });
+    pass.setPipeline(pipeline);
+    pass.draw(6);
+    pass.end();
+    encoder.copyTextureToBuffer({ texture: resolve }, { buffer: readback, bytesPerRow: W * 4 }, [W, H]);
+    device.queue.submit([encoder.finish()]);
+
+    await withTimeout(readback.mapAsync(GPUMapMode.READ), 5000, "mapAsync");
+    const pixels = new Uint8Array(readback.getMappedRange().slice(0));
+    readback.unmap();
+
+    const colors = new Set(new Uint32Array(pixels.buffer));
+    const hash = await hashBytes(pixels);
+    [msaa, resolve, readback].forEach(r => { try { r.destroy(); } catch (e) { /* ignore */ } });
+
+    return {
+        hashAlgorithm: hash.algorithm,
+        hash: hash.value,
+        width: W,
+        height: H,
+        sampleCount: SAMPLES,
+        format: FORMAT,
+        distinctColors: colors.size,
+        first4Pixels: Array.from(pixels.slice(0, 16))
+    };
+}
+
+async function computeWebGPUMath(device) {
+    const COUNT = 128;
+    const module = device.createShaderModule({ code: WEBGPU_COMPUTE_SHADER });
+    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "main" } });
+
+    const storage = device.createBuffer({
+        size: COUNT * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+    const readback = device.createBuffer({
+        size: COUNT * 4,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
+    const group = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: storage } }]
+    });
+
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, group);
+    pass.dispatchWorkgroups(COUNT / 16);
+    pass.end();
+    encoder.copyBufferToBuffer(storage, 0, readback, 0, COUNT * 4);
+    device.queue.submit([encoder.finish()]);
+
+    await withTimeout(readback.mapAsync(GPUMapMode.READ), 5000, "mapAsync");
+    const floats = new Float32Array(readback.getMappedRange().slice(0));
+    readback.unmap();
+
+    // Hash the exact bit patterns so tiny differences are not hidden by formatting
+    const bits = new Uint8Array(floats.buffer.slice(0));
+    const hash = await hashBytes(bits);
+    [storage, readback].forEach(r => { try { r.destroy(); } catch (e) { /* ignore */ } });
+
+    return {
+        hashAlgorithm: hash.algorithm,
+        hash: hash.value,
+        count: COUNT,
+        functions: ["sin", "cos", "exp", "log", "pow", "tanh", "atan2", "inverseSqrt+fma"],
+        firstOfEachFunction: Array.from({ length: 8 }, (_, k) => fmtNum(floats[k * 16]))
+    };
+}
+
+// CSS capabilities. Each probe is a feature a browser either has or doesn't,
+// and the pattern of yes/no answers is tied to the engine and its version.
+const CSS_PROPERTY_PROBES = [
+    ["display", "grid"], ["display", "contents"], ["display", "flow-root"],
+    ["grid-template-columns", "subgrid"], ["aspect-ratio", "1 / 1"], ["gap", "1px"],
+    ["container-type", "inline-size"], ["backdrop-filter", "blur(1px)"],
+    ["-webkit-backdrop-filter", "blur(1px)"], ["color", "oklch(50% 0.1 120)"],
+    ["color", "lab(50% 10 10)"], ["color", "color-mix(in srgb, red, blue)"],
+    ["color", "light-dark(red, blue)"], ["color", "rgb(from red r g b)"],
+    ["color", "color(display-p3 1 0 0)"], ["width", "min(1px, 2px)"],
+    ["width", "clamp(1px, 2px, 3px)"], ["width", "calc(1px * sin(1))"],
+    ["width", "100dvh"], ["height", "100svh"], ["width", "1cqw"],
+    ["text-wrap", "balance"], ["text-wrap", "pretty"], ["scrollbar-gutter", "stable"],
+    ["scrollbar-width", "thin"], ["scrollbar-color", "red blue"],
+    ["overscroll-behavior", "contain"], ["field-sizing", "content"],
+    ["anchor-name", "--a"], ["position-anchor", "--a"],
+    ["interpolate-size", "allow-keywords"], ["animation-timeline", "scroll()"],
+    ["view-transition-name", "a"], ["transition-behavior", "allow-discrete"],
+    ["content-visibility", "auto"], ["contain", "layout"], ["accent-color", "red"],
+    ["appearance", "none"], ["-webkit-appearance", "none"], ["-moz-appearance", "none"],
+    ["mask-image", "linear-gradient(red, blue)"], ["-webkit-mask-image", "linear-gradient(red, blue)"],
+    ["clip-path", "circle(50%)"], ["offset-path", "path('M0 0')"],
+    ["translate", "1px"], ["rotate", "1deg"], ["scale", "1"], ["zoom", "1"],
+    ["font-variation-settings", "'wght' 400"], ["font-optical-sizing", "auto"],
+    ["font-palette", "normal"], ["font-synthesis-weight", "none"],
+    ["text-decoration-thickness", "1px"], ["text-underline-offset", "1px"],
+    ["text-emphasis", "dot"], ["hyphens", "auto"], ["line-clamp", "2"],
+    ["-webkit-line-clamp", "2"], ["initial-letter", "2"], ["math-style", "compact"],
+    ["inset", "0"], ["margin-inline", "1px"], ["padding-block", "1px"],
+    ["border-start-start-radius", "1px"], ["object-fit", "cover"],
+    ["image-rendering", "pixelated"], ["image-rendering", "crisp-edges"],
+    ["background", "image-set(url(a.png) 1x)"], ["shape-outside", "circle()"],
+    ["touch-action", "pan-x"], ["will-change", "transform"], ["isolation", "isolate"],
+    ["mix-blend-mode", "multiply"], ["filter", "drop-shadow(0 0 1px red)"],
+    ["backface-visibility", "hidden"], ["transform-style", "preserve-3d"],
+    ["perspective", "100px"], ["scroll-snap-type", "x mandatory"],
+    ["scroll-timeline", "--t"], ["caret-color", "red"], ["color-scheme", "light dark"],
+    ["forced-color-adjust", "none"], ["print-color-adjust", "exact"],
+    ["-webkit-text-stroke", "1px red"], ["-webkit-font-smoothing", "antialiased"],
+    ["-moz-osx-font-smoothing", "grayscale"], ["-webkit-tap-highlight-color", "red"],
+    ["-webkit-touch-callout", "none"], ["-moz-user-select", "none"],
+    ["-webkit-box-reflect", "below"], ["reading-flow", "normal"],
+    ["text-box-trim", "trim-both"], ["corner-shape", "squircle"]
+];
+
+const CSS_SELECTOR_PROBES = [
+    ":has(a)", ":is(a, b)", ":where(a)", ":not(a, b)", ":focus-visible", ":focus-within",
+    ":user-invalid", ":modal", ":popover-open", ":fullscreen", "::backdrop", "::marker",
+    "::file-selector-button", "::highlight(a)", "::view-transition", ":state(a)",
+    ":autofill", ":-webkit-autofill", ":-moz-focusring", "::-webkit-scrollbar",
+    "::-moz-selection", ":nth-child(1 of a)", ":dir(ltr)", ":lang(en)",
+    ":placeholder-shown", "::target-text", ":open", "::details-content", "& a",
+    "::slotted(a)", ":host", ":defined", ":picture-in-picture", ":seeking", ":muted"
+];
+
+const CSS_AT_RULE_PROBES = [
+    "@container", "@layer", "@scope", "@starting-style", "@property", "@font-palette-values",
+    "@view-transition", "@position-try", "@counter-style", "@font-feature-values", "@page"
+];
+
+const CSS_FONT_PROBES = [
+    "font-tech(color-COLRv1)", "font-tech(variations)", "font-tech(palettes)",
+    "font-format(woff2)", "font-format(woff)", "font-format(opentype)", "font-format(collection)"
+];
+
+const CSS_API_PROBES = {
+    "CSS.registerProperty": () => typeof CSS.registerProperty === "function",
+    "CSS.highlights": () => !!CSS.highlights,
+    "CSS.paintWorklet": () => !!CSS.paintWorklet,
+    "CSS.escape": () => typeof CSS.escape === "function",
+    "CSS.px (Typed OM)": () => typeof CSS.px === "function",
+    "CSSStyleSheet.replaceSync": () => typeof CSSStyleSheet.prototype.replaceSync === "function",
+    "document.adoptedStyleSheets": () => "adoptedStyleSheets" in document,
+    "Element.checkVisibility": () => typeof Element.prototype.checkVisibility === "function",
+    "document.startViewTransition": () => typeof document.startViewTransition === "function",
+    "HTMLElement.showPopover": () => typeof HTMLElement.prototype.showPopover === "function",
+    "Highlight": () => typeof Highlight !== "undefined",
+    "ScrollTimeline": () => typeof ScrollTimeline !== "undefined",
+    "ViewTimeline": () => typeof ViewTimeline !== "undefined",
+    "StylePropertyMap": () => typeof StylePropertyMap !== "undefined",
+    "CSSContainerRule": () => typeof CSSContainerRule !== "undefined",
+    "CSSLayerBlockRule": () => typeof CSSLayerBlockRule !== "undefined",
+    "CSSScopeRule": () => typeof CSSScopeRule !== "undefined",
+    "CSSStartingStyleRule": () => typeof CSSStartingStyleRule !== "undefined",
+    "CSSPropertyRule": () => typeof CSSPropertyRule !== "undefined",
+    "CSSFontPaletteValuesRule": () => typeof CSSFontPaletteValuesRule !== "undefined",
+    "CSSPositionTryRule": () => typeof CSSPositionTryRule !== "undefined",
+    "CSSNestedDeclarations": () => typeof CSSNestedDeclarations !== "undefined",
+    "ResizeObserver contentBoxSize": () => typeof ResizeObserverEntry !== "undefined" && "contentBoxSize" in ResizeObserverEntry.prototype
+};
+
+const SYSTEM_COLOR_KEYWORDS = [
+    "Canvas", "CanvasText", "LinkText", "VisitedText", "ActiveText", "ButtonFace", "ButtonText",
+    "ButtonBorder", "Field", "FieldText", "Highlight", "HighlightText", "SelectedItem",
+    "SelectedItemText", "Mark", "MarkText", "GrayText", "AccentColor", "AccentColorText",
+    "ActiveBorder", "ActiveCaption", "AppWorkspace", "Background", "ButtonHighlight",
+    "ButtonShadow", "CaptionText", "InactiveBorder", "InactiveCaption", "InactiveCaptionText",
+    "InfoBackground", "InfoText", "Menu", "MenuText", "Scrollbar", "ThreeDDarkShadow",
+    "ThreeDFace", "ThreeDHighlight", "ThreeDLightShadow", "ThreeDShadow", "Window",
+    "WindowFrame", "WindowText", "-webkit-focus-ring-color"
+];
+
+const SYSTEM_FONT_KEYWORDS = ["caption", "icon", "menu", "message-box", "small-caption", "status-bar", "-apple-system-body"];
+
+async function getCssFeatures() {
+    if (!window.CSS || typeof CSS.supports !== "function") return { supported: false };
+
+    const test = (fn) => { try { return !!fn(); } catch (e) { return false; } };
+    const results = {};
+
+    const unsupported = { properties: [], selectors: [], atRules: [], fonts: [], apis: [] };
+    const bits = [];
+    const record = (group, label, ok) => {
+        bits.push(ok ? "1" : "0");
+        if (!ok) unsupported[group].push(label);
+    };
+
+    for (const [prop, value] of CSS_PROPERTY_PROBES) {
+        record("properties", `${prop}: ${value}`, test(() => CSS.supports(prop, value)));
+    }
+    for (const sel of CSS_SELECTOR_PROBES) {
+        record("selectors", sel, test(() => CSS.supports(`selector(${sel})`)));
+    }
+    for (const rule of CSS_AT_RULE_PROBES) {
+        // at-rule() is itself new, so a false here can mean "can't ask" rather than "no"
+        record("atRules", rule, test(() => CSS.supports(`at-rule(${rule})`)));
+    }
+    for (const font of CSS_FONT_PROBES) {
+        record("fonts", font, test(() => CSS.supports(font)));
+    }
+    for (const [name, fn] of Object.entries(CSS_API_PROBES)) {
+        record("apis", name, test(fn));
+    }
+
+    results.tested = bits.length;
+    results.supportedCount = bits.filter(b => b === "1").length;
+    results.unsupported = unsupported;
+    results.bitmapHash = (await hashString(bits.join(""))).value.slice(0, 16);
+
+    // Values that depend on the OS, theme and browser defaults rather than on support
+    results.computed = withMeasureHost((host) => {
+        const out = {};
+        const cs = getComputedStyle(document.documentElement);
+        const names = [];
+        for (let i = 0; i < cs.length; i++) names.push(cs[i]);
+        out.computedPropertyCount = cs.length;
+        out.computedPropertyNames = names;
+
+        // System colour keywords resolve differently per OS and theme
+        const colorEl = document.createElement("div");
+        host.appendChild(colorEl);
+        out.systemColors = {};
+        for (const kw of SYSTEM_COLOR_KEYWORDS) {
+            if (!test(() => CSS.supports("color", kw))) { out.systemColors[kw] = null; continue; }
+            colorEl.style.color = kw;
+            out.systemColors[kw] = getComputedStyle(colorEl).color;
+        }
+
+        // System fonts from the `font` shorthand resolve to OS-specific families and sizes
+        out.systemFonts = {};
+        for (const kw of SYSTEM_FONT_KEYWORDS) {
+            const el = document.createElement("div");
+            host.appendChild(el);
+            el.style.font = kw;
+            const c = getComputedStyle(el);
+            out.systemFonts[kw] = el.style.font
+                ? `${c.fontFamily} | ${c.fontSize} | ${c.fontWeight} | ${c.fontStyle}`
+                : null;
+        }
+
+        // Default sizes for generic families (e.g. monospace is often 13px)
+        out.defaultFontSizes = {};
+        for (const fam of ["serif", "sans-serif", "monospace", "system-ui", "cursive", "fantasy"]) {
+            const el = document.createElement("div");
+            el.style.cssText = `font-family:${fam};font-size:medium;`;
+            host.appendChild(el);
+            out.defaultFontSizes[fam] = getComputedStyle(el).fontSize;
+        }
+
+        // Classic scrollbar width (0 for overlay scrollbars)
+        const sb = document.createElement("div");
+        sb.style.cssText = "width:100px;height:100px;overflow:scroll;";
+        host.appendChild(sb);
+        out.scrollbarWidth = sb.offsetWidth - sb.clientWidth;
+        out.scrollbarHeight = sb.offsetHeight - sb.clientHeight;
+        return out;
+    });
+
+    // Hash everything except the (long) property-name list, which is hashed separately
+    const nameList = results.computed.computedPropertyNames || [];
+    results.computed.computedPropertyNamesHash = (await hashString(nameList.join(","))).value.slice(0, 16);
+    delete results.computed.computedPropertyNames;
+
+    const hash = await hashString(JSON.stringify(results));
+    return { hashAlgorithm: hash.algorithm, hash: hash.value, ...results };
 }
 
 // ---------------------------------------------------------------------------
@@ -887,6 +1940,12 @@ async function runFingerprint(options = {}) {
         prefsAndLocale: await step("preferences", getPreferencesAndLocale),
         navigatorExtras: await step("navigator extras", getNavigatorExtras),
         timer: await step("timer resolution", getTimerResolution),
+        webgpu: await step("webgpu", getWebGPUInfo),
+        webgpuRendering: await step("webgpu rendering", getWebGPURendering),
+        cssFeatures: await step("css features", getCssFeatures),
+        mediaFeatures: await step("media features", getMediaFeatures),
+        jsEngine: await step("javascript engine", getJsEngineInfo),
+        textRendering: await step("text rendering", getTextRenderingInfo),
         mediaDevices: await step("media devices", getMediaDevices),
         permissions: await step("permissions", getPermissionStates),
         storageAndPower: await step("storage and power", getStorageAndPower),
@@ -920,7 +1979,16 @@ async function runFingerprint(options = {}) {
         plugins: result.plugins,
         codecs: result.codecs,
         speechVoices: result.speechVoices,
-        prefsAndLocale: result.prefsAndLocale
+        prefsAndLocale: result.prefsAndLocale,
+        webgpu: result.webgpu,
+        // hashes only: the rest of these objects is diagnostic detail
+        webgpuRendering: result.webgpuRendering && result.webgpuRendering.hash,
+        cssFeatures: result.cssFeatures && result.cssFeatures.hash,
+        // volatile (orientation, display mode, overflow) is window state, so it is left out
+        mediaFeatures: result.mediaFeatures && { ...result.mediaFeatures, volatile: undefined },
+        // timing is noisy and not part of jsEngine.hash
+        jsEngine: result.jsEngine && result.jsEngine.hash,
+        textRendering: result.textRendering && result.textRendering.hash
     };
     result.combinedHash = await hashString(JSON.stringify(stable));
 
