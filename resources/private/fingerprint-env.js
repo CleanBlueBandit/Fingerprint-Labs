@@ -594,14 +594,15 @@ async function getTimezoneBehavior() {
     const dateOffsets = Object.fromEntries(Object.entries(instants).map(([k, t]) => [k, -new Date(t).getTimezoneOffset()]));
 
     // The same offsets worked out through Intl for the reported zone. A mismatch means one of the two
-    // was altered (a spoofed zone name, or a patched Date).
+    // was altered (a spoofed zone name, or a patched Date). Intl is rounded to whole minutes while Date
+    // keeps seconds (pre-1900 local mean time, e.g. Asia/Tbilisi is +2:59:11), so allow under a minute.
     const intlOffset = (t) => attempt(() => {
         const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric" })
             .formatToParts(t).filter((x) => x.type !== "literal").map((x) => [x.type, Number(x.value)]));
         return Math.round((Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - t) / 60000);
     });
     const intlOffsets = Object.fromEntries(Object.entries(instants).map(([k, t]) => [k, intlOffset(t)]));
-    const disagreements = Object.keys(instants).filter((k) => typeof intlOffsets[k] === "number" && intlOffsets[k] !== dateOffsets[k]);
+    const disagreements = Object.keys(instants).filter((k) => typeof intlOffsets[k] === "number" && Math.abs(intlOffsets[k] - dateOffsets[k]) >= 1);
 
     // Days in 2026 on which the offset changes (daylight-saving transitions), with the size of the change
     const transitions = [];

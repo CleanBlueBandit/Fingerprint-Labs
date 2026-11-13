@@ -130,6 +130,32 @@ test('timezone: Intl and Date agree in this environment', async () => {
     assert.equal(r.normalized.intlAgreesWithDate, true);
 });
 
+test('timezone: a zone with sub-minute local mean time is not flagged as spoofed', async () => {
+    // Chromium reports Asia/Tbilisi's pre-1900 offset (+2:59:11) with its seconds, as -179.1833
+    // minutes, while Intl rounds to whole minutes. Node reports a whole minute, so stand in for
+    // the browser. An unmodified browser must still count as agreeing with itself.
+    const FRACTIONAL = -179.18333333333334;
+    class BrowserLikeDate extends Date {
+        getTimezoneOffset() {
+            return this.getTime() === Date.UTC(1900, 0, 1) ? FRACTIONAL : super.getTimezoneOffset();
+        }
+    }
+    const before = process.env.TZ;
+    process.env.TZ = 'Asia/Tbilisi';
+    try {
+        const sandbox = loadFingerprint(ALL, { Date: BrowserLikeDate });
+        const test = sandbox.get('FP_TEST_REGISTRY').find((x) => x.id === 'timezoneBehavior');
+        const r = await sandbox.get('runRegisteredTest')(test, { result: {}, opts: {} });
+        assert.equal(r.raw.zone, 'Asia/Tbilisi');
+        assert.equal(r.raw.dateOffsets['1900-01-01'], -FRACTIONAL);
+        assert.equal(r.raw.intlOffsets['1900-01-01'], 179);
+        assert.equal(r.raw.disagreements.length, 0);
+        assert.equal(r.normalized.intlAgreesWithDate, true);
+    } finally {
+        if (before === undefined) delete process.env.TZ; else process.env.TZ = before;
+    }
+});
+
 test('audio rendering with a fake engine: noise is detected and excluded', async () => {
     let call = 0;
     class FakeOAC {

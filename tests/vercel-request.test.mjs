@@ -12,7 +12,8 @@ const HEADERS = {
     'x-vercel-ip-latitude': '29.4227',
     'x-vercel-ip-longitude': '-98.4927',
     'x-vercel-ip-timezone': 'America/Chicago',
-    'x-vercel-ip-postal-code': '78205'
+    'x-vercel-ip-postal-code': '78205',
+    'x-vercel-ip-as-number': '215348'
 };
 
 test('reads and decodes the full set of Vercel headers', () => {
@@ -21,7 +22,7 @@ test('reads and decodes the full set of Vercel headers', () => {
     assert.equal(r.trusted, true);
     assert.deepEqual(r.geo, {
         country: 'US', continent: 'NA', region: 'TX', city: 'San Antonio',
-        latitude: 29.4227, longitude: -98.4927, timezone: 'America/Chicago', postalCode: '78205'
+        latitude: 29.4227, longitude: -98.4927, timezone: 'America/Chicago', postalCode: '78205', asn: 215348
     });
     assert.deepEqual(r.edge, {
         id: 'd7jxv-1704551507000-4d96ae5b07e7',
@@ -53,12 +54,13 @@ test('malformed values are dropped individually', () => {
         'x-vercel-ip-longitude': 'abc',
         'x-vercel-ip-timezone': '../etc/passwd',
         'x-vercel-ip-postal-code': '<script>',
+        'x-vercel-ip-as-number': 'AS123',
         'x-vercel-ip-country-region': 'CA',
         'x-vercel-id': 'no-separator'
     }, { onVercel: true });
     assert.deepEqual(r.geo, {
         country: null, continent: null, region: 'CA', city: null,
-        latitude: null, longitude: null, timezone: null, postalCode: null
+        latitude: null, longitude: null, timezone: null, postalCode: null, asn: null
     });
     assert.equal(r.edge, null);
 });
@@ -75,8 +77,16 @@ test('overlong values are rejected', () => {
     assert.equal(r.geo.country, 'US');
 });
 
+test('a missing postal code and ASN stay null while the rest is read', () => {
+    const r = readVercelRequest({ 'x-vercel-ip-country': 'GE', 'x-vercel-ip-timezone': 'Asia/Tbilisi' }, { onVercel: true });
+    assert.equal(r.geo.postalCode, null);
+    assert.equal(r.geo.asn, null);
+    assert.equal(r.geo.country, 'GE');
+});
+
 test('header set contains exactly the documented headers', () => {
-    assert.equal(VERCEL_REQUEST_HEADERS.size, 9);
+    assert.equal(VERCEL_REQUEST_HEADERS.size, 10);
+    assert.ok(VERCEL_REQUEST_HEADERS.has('x-vercel-ip-as-number'));
     assert.ok(VERCEL_REQUEST_HEADERS.has('x-vercel-ip-postal-code'));
 });
 

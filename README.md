@@ -117,6 +117,7 @@ node server.js
 ├── lib/
 │   ├── fingerprint-compare.js # Weighted similarity between two saved fingerprints
 │   ├── fingerprint-store.js # Hash extraction and payload sanitising for saved fingerprints
+│   ├── redact.js            # Hides credential headers (OIDC token, signatures) from responses and saved results
 │   ├── tls-fingerprint.js   # Reads and validates the JA3/JA4 headers Vercel sends
 │   └── vercel-request.js    # Reads and validates Vercel's IP geolocation and edge routing headers
 ├── routes/
@@ -179,7 +180,7 @@ The response is sent only to the caller and nothing is stored. It contains:
 - `ip`: the address Express resolves (`client`, honouring `trust proxy`), the trusted `X-Forwarded-For` entries (`forwardedChain`) and the raw TCP peer (`socket`, with port and family). Each address has its IP version and a class (`public`, `private`, `loopback`, `link-local`, `carrier-grade-nat`, and so on). IPv4-mapped IPv6 addresses are unwrapped.
 - `http`: HTTP version, method, protocol, host, hostname, original URL, full path, query, subdomains, `xhr`.
 - `tls`: protocol, cipher, ALPN and server name of the socket Node sees. This is `null` behind Vercel, because TLS ends at Vercel's edge; see `tlsFingerprint` for the client's handshake.
-- `headers`, `headerOrder`, `headerCount`: every header received, plus the original names, casing and order. Credential headers (`authorization`, `proxy-authorization`, `x-api-key`, `x-auth-token`) are redacted and `cookie` is left out.
+- `headers`, `headerOrder`, `headerCount`: every header received, plus the original names, casing and order. Credential headers are redacted and `cookie` is left out. That covers `authorization`, `proxy-authorization`, `x-api-key`, `x-auth-token`, anything whose name contains `token`, `secret`, `password`, `signature` or `credential` (on Vercel that includes `x-vercel-oidc-token` and `x-vercel-proxy-signature`), and the `sig=` part of `Forwarded`. Saved fingerprints are scrubbed the same way before they are stored (`lib/redact.js`).
 - `groups`: the same headers sorted into `proxy`, `clientHints`, `preferenceHints` (`Sec-CH-Prefers-*`, a subset of `clientHints`), `fetchMetadata`, `signals` (DNT, Sec-GPC, Save-Data, Priority and similar) and `tlsProxy` (the `x-vercel-ja4-digest` / `x-vercel-ja3-digest` headers, see the TLS note below) and `vercel` (the `x-vercel-ip-*` and `x-vercel-id` headers).
 - `parsed`: `Accept-Language` with q-values, `Accept-Encoding` and `Accept` as lists; `acceptDetail` (Accept with q-values) and `acceptRaw`; `doNotTrack` and `globalPrivacyControl`; and `fetchMetadata` (`Sec-Fetch-Site/Mode/Dest/User`).
 - `signature`: short SHA-256 hashes of the header order (as sent and lowercased), `Accept`, `Accept-Encoding` and `Accept-Language`, for comparing the request's shape across runs.
@@ -200,7 +201,7 @@ The response has a `tlsFingerprint` object:
 
 - `source`: `"vercel"` when at least one well-formed digest was present, otherwise `null`.
 - `trusted`: `true` when running on Vercel (`VERCEL=1`), `false` anywhere else, `null` when there is nothing to report. Off Vercel nothing strips these headers from incoming requests, so a client can send any value it likes; `tlsNote` says so.
-- `ja4`, `ja3`: the digests, lowercased. A malformed value is dropped rather than passed through.
+- `ja4`, `ja3`: the digests, lowercased. A malformed value is dropped rather than passed through. Vercel documents both headers, but on live requests only `x-vercel-ja4-digest` has been seen, so expect `ja3` to be `null`.
 - `ja4Parts`: the readable part of the JA4 decoded: `protocol` (tcp/quic/dtls), `tlsVersion`, `sni`, `cipherCount`, `extensionCount`, `alpn`, plus the `cipherHash` and `extensionHash`.
 
 The raw ClientHello (cipher list, extension order, groups, GREASE/ECH flags) and the JA3/JA4 pre-hash strings are not available any more, because Vercel only exposes the digests.
@@ -216,7 +217,7 @@ Treat the fingerprint as one weak signal. It identifies a TLS client configurati
 **IP geolocation and edge routing (Vercel).** On Vercel the response also has a `vercel` object, read from the [request headers Vercel adds](https://vercel.com/docs/headers/request-headers) by `lib/vercel-request.js`:
 
 - `source` and `trusted`: same meaning as in `tlsFingerprint` (`trusted` is `true` only when running on Vercel).
-- `geo`: `country`, `continent`, `region`, `city` (decoded), `latitude`, `longitude`, `timezone` and `postalCode` for the client's public IP address, from the `x-vercel-ip-*` headers. Each field is validated and is `null` if it is missing or malformed.
+- `geo`: `country`, `continent`, `region`, `city` (decoded), `latitude`, `longitude`, `timezone`, `postalCode` and `asn` (the network operator's autonomous system number) for the client's public IP address, from the `x-vercel-ip-*` headers. Each field is validated and is `null` if it is missing or malformed. `postalCode` is often absent, and `asn` (`x-vercel-ip-as-number`) is missing from Vercel's header reference but was seen on live requests, so don't rely on it staying.
 - `edge`: from `x-vercel-id`, the `regions` the request passed through, the `edgeRegion` that received it, the `executionRegion` that ran the function, and the request `id`. Vercel documents the header as the regions hit plus the execution region; the exact layout here is inferred from observed values.
 
 These describe the IP address and network path, not the device. The location is only as accurate as IP geolocation, so a VPN or mobile carrier gives the exit point's location. They are not part of `combinedHash` or the similarity score. Coordinates and postal code are coarse but personal, so treat saved results accordingly.

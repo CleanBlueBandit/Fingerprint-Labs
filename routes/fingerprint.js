@@ -3,6 +3,7 @@ import net from 'node:net';
 import { createHash } from 'node:crypto';
 import { TLS_FINGERPRINT_HEADERS, readTlsFingerprint, tlsNoteFor } from '../lib/tls-fingerprint.js';
 import { VERCEL_REQUEST_HEADERS, readVercelRequest } from '../lib/vercel-request.js';
+import { redactHeaderValue } from '../lib/redact.js';
 import rateLimit from 'express-rate-limit';
 import prisma from '../db/prisma.js';
 import { compareFingerprints } from '../lib/fingerprint-compare.js';
@@ -62,12 +63,6 @@ export const ACCEPT_CH = [
     'Save-Data'
 ].join(', ');
 
-const SENSITIVE_HEADERS = new Set([
-    'authorization',
-    'proxy-authorization',
-    'x-api-key',
-    'x-auth-token'
-]);
 
 // Headers that proxies, CDNs and load balancers commonly add
 const PROXY_HEADERS = new Set([
@@ -428,7 +423,7 @@ router.get('/info', limiter, (req, res) => {
     const headers = {};
     for (const [name, value] of Object.entries(req.headers)) {
         if (name === 'cookie') continue;
-        headers[name] = SENSITIVE_HEADERS.has(name) ? '[redacted]' : value;
+        headers[name] = redactHeaderValue(name, value);
     }
 
     // Original header names, casing and order (differs between browsers)
