@@ -42,7 +42,7 @@ const httpServer = tlsEnabled
 const { Pool } = pg;
 
 const pgPool = new Pool({
-    connectionString: process.env.DATABASE_URL
+    connectionString: process.env.DB_DATABASE_URL_POOLED
 });
 
 const PgSession = connectPgSimple(session);
