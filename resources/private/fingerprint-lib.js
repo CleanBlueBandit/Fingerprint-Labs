@@ -13,7 +13,7 @@ This test collects technical and potentially identifying data from your browser,
   - how your audio engine renders a test tone, how your GPU renders a WebGL test scene, and which fonts render glyphs in several scripts
   - WebAssembly, WebCodecs and MediaCapabilities support (including hardware decoding hints), device and sensor API availability, and how IndexedDB, Cache, compression, RegExp, Intl and date functions behave
   - optionally, details of every connected screen (only if you opt in AND approve the browser prompt)
-  - the JA3/JA4 fingerprint of your TLS handshake, when this server runs on Vercel (Vercel's edge computes it)
+  - the JA3/JA4 fingerprint of your TLS handshake, plus the country, region, city, approximate coordinates, postal code and time zone that Vercel derives from your IP address, when this server runs on Vercel
   - installed plugins, connected media devices (types and counts), permission states, storage and battery status
   - optionally, your precise location (only if you opt in AND approve the browser prompt)
 Results are shown in your browser and are not uploaded unless you press "Save to my account", which stores the full result against your account on this server until you delete it. The server you are connected to sees your IP address and request headers when you run the test, and the WebRTC test contacts a third-party STUN server.
@@ -503,6 +503,23 @@ async function getServerView(url = "/fingerprint/info") {
     return first.data;
 }
 
+// UTC offset in minutes of an IANA time zone right now, or null if the name is unknown.
+// Comparing offsets instead of names avoids false mismatches between aliases such as
+// Asia/Calcutta and Asia/Kolkata.
+function timeZoneOffsetMinutes(timeZone, date = new Date()) {
+    try {
+        const part = new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "longOffset" })
+            .formatToParts(date)
+            .find(p => p.type === "timeZoneName");
+        if (!part) return null;
+        if (part.value === "GMT") return 0;
+        const m = /^GMT([+-])(\d{1,2})(?::(\d{2}))?$/.exec(part.value);
+        return m ? (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] || 0)) : null;
+    } catch (e) {
+        return null;
+    }
+}
+
 // Compare what the browser says about itself with what the server received.
 // Mismatches suggest spoofing, an extension, or a proxy/VPN in the path.
 function getConsistency(result) {
@@ -539,8 +556,20 @@ function getConsistency(result) {
         : null;
     const schemeHeader = unq(headers["sec-ch-prefers-color-scheme"]);
 
+    // Time zone Vercel derived from the IP vs the browser's own. A mismatch is normal for
+    // a VPN or a traveller, and suspicious for a spoofed time zone.
+    const ipTimeZone = sv.vercel && sv.vercel.geo && sv.vercel.geo.timezone;
+    const browserTimeZone = (() => {
+        try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { return null; }
+    })();
+    const ipOffset = ipTimeZone ? timeZoneOffsetMinutes(ipTimeZone) : null;
+    const browserOffset = browserTimeZone ? timeZoneOffsetMinutes(browserTimeZone) : null;
+
     return {
         userAgentMatches: headers["user-agent"] === navigator.userAgent,
+        ipTimeZoneMatchesBrowser: ipOffset !== null && browserOffset !== null
+            ? ipOffset === browserOffset
+            : null,
         clientHintsArchitectureMatches: hintMatch("sec-ch-ua-arch", ch.architecture),
         clientHintsBitnessMatches: hintMatch("sec-ch-ua-bitness", ch.bitness),
         clientHintsPlatformVersionMatches: hintMatch("sec-ch-ua-platform-version", ch.platformVersion),

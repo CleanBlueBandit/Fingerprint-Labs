@@ -117,7 +117,8 @@ node server.js
 ├── lib/
 │   ├── fingerprint-compare.js # Weighted similarity between two saved fingerprints
 │   ├── fingerprint-store.js # Hash extraction and payload sanitising for saved fingerprints
-│   └── tls-fingerprint.js   # Reads and validates the JA3/JA4 headers Vercel sends
+│   ├── tls-fingerprint.js   # Reads and validates the JA3/JA4 headers Vercel sends
+│   └── vercel-request.js    # Reads and validates Vercel's IP geolocation and edge routing headers
 ├── routes/
 │   ├── auth.js              # POST /auth/register, /auth/login, /auth/logout; GET /auth/me
 │   ├── pages.js             # HTML page routes (/, /login, /register, /dashboard, /fingerprint, /coffee)
@@ -179,7 +180,7 @@ The response is sent only to the caller and nothing is stored. It contains:
 - `http`: HTTP version, method, protocol, host, hostname, original URL, full path, query, subdomains, `xhr`.
 - `tls`: protocol, cipher, ALPN and server name of the socket Node sees. This is `null` behind Vercel, because TLS ends at Vercel's edge; see `tlsFingerprint` for the client's handshake.
 - `headers`, `headerOrder`, `headerCount`: every header received, plus the original names, casing and order. Credential headers (`authorization`, `proxy-authorization`, `x-api-key`, `x-auth-token`) are redacted and `cookie` is left out.
-- `groups`: the same headers sorted into `proxy`, `clientHints`, `preferenceHints` (`Sec-CH-Prefers-*`, a subset of `clientHints`), `fetchMetadata`, `signals` (DNT, Sec-GPC, Save-Data, Priority and similar) and `tlsProxy` (the `x-vercel-ja4-digest` / `x-vercel-ja3-digest` headers, see the TLS note below).
+- `groups`: the same headers sorted into `proxy`, `clientHints`, `preferenceHints` (`Sec-CH-Prefers-*`, a subset of `clientHints`), `fetchMetadata`, `signals` (DNT, Sec-GPC, Save-Data, Priority and similar) and `tlsProxy` (the `x-vercel-ja4-digest` / `x-vercel-ja3-digest` headers, see the TLS note below) and `vercel` (the `x-vercel-ip-*` and `x-vercel-id` headers).
 - `parsed`: `Accept-Language` with q-values, `Accept-Encoding` and `Accept` as lists; `acceptDetail` (Accept with q-values) and `acceptRaw`; `doNotTrack` and `globalPrivacyControl`; and `fetchMetadata` (`Sec-Fetch-Site/Mode/Dest/User`).
 - `signature`: short SHA-256 hashes of the header order (as sent and lowercased), `Accept`, `Accept-Encoding` and `Accept-Language`, for comparing the request's shape across runs.
 - `http` also has `versionMajor`/`versionMinor`, `alpnProtocol` (only when Node terminates TLS), `viaHops` (versions reported by proxies in `Via`), `priority` and `connection`. Behind a proxy, `version` is the proxy-to-app hop, not what the browser used.
@@ -211,6 +212,16 @@ curl -H 'x-vercel-ja4-digest: t13d1516h2_8daaf6152771_02713d6af862' http://local
 ```
 
 Treat the fingerprint as one weak signal. It identifies a TLS client configuration, not a person: users on the same browser build share it, and Vercel's own guidance warns against identifying or blocking someone on a JA4 hash alone. People have reported identical Chrome JA4 values across different countries for exactly this reason. That is why the similarity score gives it a low weight and keeps it out of `combinedHash`. Chromium also shuffles TLS extension order per connection, so JA3 varies between connections while JA4 stays stable.
+
+**IP geolocation and edge routing (Vercel).** On Vercel the response also has a `vercel` object, read from the [request headers Vercel adds](https://vercel.com/docs/headers/request-headers) by `lib/vercel-request.js`:
+
+- `source` and `trusted`: same meaning as in `tlsFingerprint` (`trusted` is `true` only when running on Vercel).
+- `geo`: `country`, `continent`, `region`, `city` (decoded), `latitude`, `longitude`, `timezone` and `postalCode` for the client's public IP address, from the `x-vercel-ip-*` headers. Each field is validated and is `null` if it is missing or malformed.
+- `edge`: from `x-vercel-id`, the `regions` the request passed through, the `edgeRegion` that received it, the `executionRegion` that ran the function, and the request `id`. Vercel documents the header as the regions hit plus the execution region; the exact layout here is inferred from observed values.
+
+These describe the IP address and network path, not the device. The location is only as accurate as IP geolocation, so a VPN or mobile carrier gives the exit point's location. They are not part of `combinedHash` or the similarity score. Coordinates and postal code are coarse but personal, so treat saved results accordingly.
+
+With `network` on, the client uses `geo.timezone` for one extra consistency check: `consistency.ipTimeZoneMatchesBrowser` compares the UTC offset of the IP's time zone with the browser's (offsets, not names, so aliases like `Asia/Calcutta` and `Asia/Kolkata` match). `false` suggests a VPN, a traveller, or a spoofed browser time zone; `null` means there was no data.
 
 ### Saved fingerprints API
 
@@ -275,7 +286,7 @@ Files under `/src/...` are looked up first in `resources/public/`, then in `reso
 | `stunServers` | Google STUN | STUN URLs used for the WebRTC test. |
 | `onProgress` | none | Called with the name of each step as it starts. |
 
-With `network` on, the result has `serverView` (the endpoint's response plus `clientTiming` with round-trip time and estimated clock skew), `webrtcIPs`, and `consistency`, which compares the browser's own claims with what the server received: User-Agent, primary language and language list, client-hint platform, and whether WebRTC's public addresses match the IP the server saw (a mismatch can indicate a VPN or proxy leak).
+With `network` on, the result has `serverView` (the endpoint's response plus `clientTiming` with round-trip time and estimated clock skew), `webrtcIPs`, and `consistency`, which compares the browser's own claims with what the server received: User-Agent, primary language and language list, client-hint platform, the browser time zone against the IP's time zone (on Vercel), and whether WebRTC's public addresses match the IP the server saw (a mismatch can indicate a VPN or proxy leak).
 
 The page and its scripts require login: the route in `routes/pages.js` uses `authenticate`, and the page lives in `images/authenticated/` with its assets in `resources/private/`.
 

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import net from 'node:net';
 import { createHash } from 'node:crypto';
 import { TLS_FINGERPRINT_HEADERS, readTlsFingerprint, tlsNoteFor } from '../lib/tls-fingerprint.js';
+import { VERCEL_REQUEST_HEADERS, readVercelRequest } from '../lib/vercel-request.js';
 import rateLimit from 'express-rate-limit';
 import prisma from '../db/prisma.js';
 import { compareFingerprints } from '../lib/fingerprint-compare.js';
@@ -497,6 +498,10 @@ router.get('/info', limiter, (req, res) => {
         tlsFingerprint,
         tlsNote: tlsNoteFor(tlsFingerprint),
 
+        // IP geolocation and edge routing as reported by Vercel (see lib/vercel-request.js).
+        // Describes the IP address and network path, not the device.
+        vercel: readVercelRequest(req.headers),
+
         headers,
         headerOrder,
         headerCount: headerOrder.length,
@@ -509,7 +514,8 @@ router.get('/info', limiter, (req, res) => {
             fetchMetadata: pickHeaders(headers, (name) => name.startsWith('sec-fetch-')),
             signals: pickHeaders(headers, (name) => MISC_SIGNAL_HEADERS.has(name)),
             // The x-vercel-ja4-digest / x-vercel-ja3-digest headers, when present
-            tlsProxy: pickHeaders(headers, (name) => TLS_FINGERPRINT_HEADERS.has(name))
+            tlsProxy: pickHeaders(headers, (name) => TLS_FINGERPRINT_HEADERS.has(name)),
+            vercel: pickHeaders(headers, (name) => VERCEL_REQUEST_HEADERS.has(name))
         },
 
         // Compact request-shape signature: header names in order, plus the values
