@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { PrismaClient } from '../generated/prisma/client.ts';
+import { PrismaClient } from '../generated/prisma-client.mjs';
 import { PrismaPg } from '@prisma/adapter-pg';
 
 const connectionString = process.env.DB_DATABASE_URL_POOLED;
