@@ -26,12 +26,22 @@
             Include precise location (your browser will ask for permission)
         </label>
 
+        <label class="fp-check">
+            <input type="checkbox" id="opt-screens">
+            Include details of every connected screen (your browser may ask for permission)
+        </label>
+
         <button id="start" type="button" disabled>Start fingerprint</button>
         <p id="status" class="fp-status" role="status"></p>
         <pre id="out" class="fp-output"></pre>
     </main>
 
+    <!-- fingerprint-lib.js must come first: the others register their tests with it -->
     <script src="/src/fingerprint-lib.js"></script>
+    <script src="/src/fingerprint-wasm.js"></script>
+    <script src="/src/fingerprint-media.js"></script>
+    <script src="/src/fingerprint-text.js"></script>
+    <script src="/src/fingerprint-env.js"></script>
     <script src="/src/fingerprint.js"></script>
 </body>
 </html>

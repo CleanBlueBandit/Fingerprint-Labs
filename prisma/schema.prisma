@@ -1,3 +1,4 @@
+
 generator client {
   provider = "prisma-client"
   output   = "../generated/prisma"
@@ -8,8 +9,39 @@ datasource db {
 }
 
 model User {
-  id           Int      @id @default(autoincrement())
-  username     String   @unique
+  id           Int                 @id @default(autoincrement())
+  username     String              @unique
   passwordHash String
-  createdAt    DateTime @default(now())
+  createdAt    DateTime            @default(now())
+
+  fingerprints BrowserFingerprint[]
+}
+
+model BrowserFingerprint {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+
+  // Complete fingerprint payload
+  data      Json     @db.JsonB
+
+  // Main fingerprint hashes, extracted for efficient querying
+  combinedHash       String? @db.VarChar(64)
+  staticHash         String? @db.VarChar(64)
+  configurationHash String? @db.VarChar(64)
+  behavioralHash    String? @db.VarChar(64)
+
+  // Fingerprint format version
+  schemaVersion Int?
+
+  createdAt DateTime @default(now())
+
+  // Relationship
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Query optimization
+  @@index([userId, createdAt])
+  @@index([combinedHash])
+  @@index([staticHash])
+  @@index([configurationHash])
+  @@index([behavioralHash])
 }

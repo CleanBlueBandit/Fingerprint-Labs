@@ -10,6 +10,9 @@ This test collects technical and potentially identifying data from your browser,
   - how your system renders text and emoji (metrics, anti-aliasing, subpixel positioning)
   - how your GPU renders a test scene and computes maths (WebGPU, WebGL shader precision)
   - which CSS features your browser supports, plus system colours, fonts and scrollbar size
+  - how your audio engine renders a test tone, how your GPU renders a WebGL test scene, and which fonts render glyphs in several scripts
+  - WebAssembly, WebCodecs and MediaCapabilities support (including hardware decoding hints), device and sensor API availability, and how IndexedDB, Cache, compression, RegExp, Intl and date functions behave
+  - optionally, details of every connected screen (only if you opt in AND approve the browser prompt)
   - when this server terminates TLS itself, the TLS handshake your browser sent (JA3/JA4)
   - installed plugins, connected media devices (types and counts), permission states, storage and battery status
   - optionally, your precise location (only if you opt in AND approve the browser prompt)
@@ -85,35 +88,103 @@ function getDisplayInfo() {
         orientation: screen.orientation ? {
             type: screen.orientation.type,
             angle: screen.orientation.angle
-        } : null
+        } : null,
+
+        // Visual viewport: the area actually visible, which shrinks with pinch zoom and on-screen
+        // keyboards. Kept apart from screen (the physical display) on purpose.
+        visualViewport: window.visualViewport ? {
+            width: window.visualViewport.width,
+            height: window.visualViewport.height,
+            scale: window.visualViewport.scale,
+            offsetLeft: window.visualViewport.offsetLeft,
+            offsetTop: window.visualViewport.offsetTop
+        } : null,
+
+        // Browser zoom changes screen.width (CSS pixels) and devicePixelRatio in opposite
+        // directions, so their product stays put. Long side first, so rotation does not matter.
+        normalized: (() => {
+            const dpr = window.devicePixelRatio || 1;
+            const pair = (a, b) => [Math.round(Math.max(a, b) * dpr), Math.round(Math.min(a, b) * dpr)];
+            return {
+                screenDevicePixels: pair(screen.width, screen.height),
+                availDevicePixels: pair(screen.availWidth, screen.availHeight),
+                colorDepth: screen.colorDepth,
+                pixelDepth: screen.pixelDepth,
+                orientationType: screen.orientation ? screen.orientation.type.replace(/-(primary|secondary)$/, "") : null
+            };
+        })()
     };
 }
 
-// Fallback hash (cyrb53) for non-secure contexts where crypto.subtle is unavailable
-function cyrb53(str, seed = 0) {
-    let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed;
-    for (let i = 0; i < str.length; i++) {
-        const ch = str.charCodeAt(i);
-        h1 = Math.imul(h1 ^ ch, 2654435761);
-        h2 = Math.imul(h2 ^ ch, 1597334677);
+// Pure-JS SHA-256 for non-secure contexts, where crypto.subtle is unavailable
+// (plain http on anything but localhost). It keeps every hash SHA-256, so values
+// stay comparable between secure and insecure origins.
+const SHA256_K = new Uint32Array([
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+]);
+
+function sha256Fallback(bytes) {
+    const h = new Uint32Array([
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    ]);
+    const bitLength = bytes.length * 8;
+    const paddedLength = ((bytes.length + 9 + 63) >> 6) << 6;
+    const data = new Uint8Array(paddedLength);
+    data.set(bytes);
+    data[bytes.length] = 0x80;
+    const view = new DataView(data.buffer);
+    view.setUint32(paddedLength - 8, Math.floor(bitLength / 4294967296));
+    view.setUint32(paddedLength - 4, bitLength >>> 0);
+
+    const w = new Uint32Array(64);
+    const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+    for (let offset = 0; offset < paddedLength; offset += 64) {
+        for (let i = 0; i < 16; i++) w[i] = view.getUint32(offset + i * 4);
+        for (let i = 16; i < 64; i++) {
+            const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+            const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+        }
+        let [a, b, c, d, e, f, g, hh] = h;
+        for (let i = 0; i < 64; i++) {
+            const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+            const ch = (e & f) ^ (~e & g);
+            const t1 = (hh + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
+            const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+            const maj = (a & b) ^ (a & c) ^ (b & c);
+            const t2 = (S0 + maj) >>> 0;
+            hh = g; g = f; f = e; e = (d + t1) >>> 0;
+            d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d;
+        h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
     }
-    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
+    return Array.from(h).map(x => x.toString(16).padStart(8, "0")).join("");
+}
+
+const toHex = (buf) => Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+
+// SHA-256 of raw bytes. Always SHA-256: crypto.subtle where available, pure JS otherwise.
+async function hashBytes(bytes) {
+    if (!(bytes instanceof Uint8Array)) {
+        bytes = new Uint8Array(bytes.buffer || bytes, bytes.byteOffset || 0, bytes.byteLength);
+    }
+    if (window.crypto && crypto.subtle) {
+        return { algorithm: "SHA-256", value: toHex(await crypto.subtle.digest("SHA-256", bytes)) };
+    }
+    return { algorithm: "SHA-256", value: sha256Fallback(bytes) };
 }
 
 async function hashString(str) {
-    if (window.crypto && crypto.subtle) {
-        const buf = new TextEncoder().encode(str);
-        const hash = await crypto.subtle.digest("SHA-256", buf);
-        return {
-            algorithm: "SHA-256",
-            value: Array.from(new Uint8Array(hash))
-                .map(b => b.toString(16).padStart(2, "0"))
-                .join("")
-        };
-    }
-    return { algorithm: "cyrb53", value: cyrb53(str) };
+    return hashBytes(new TextEncoder().encode(str));
 }
 
 async function getCanvasFingerprint() {
@@ -186,6 +257,8 @@ async function getAudioOutputInfo() {
             state: ctx.state, // often "suspended" until a user gesture
             baseLatency: ctx.baseLatency ?? null,
             outputLatency: ctx.outputLatency ?? null,
+            // state and both latencies follow the output device and session, not the browser build
+            volatile: ["state", "baseLatency", "outputLatency"],
             destination: {
                 maxChannelCount: dest.maxChannelCount,
                 channelCount: dest.channelCount,
@@ -586,15 +659,95 @@ function getShaderPrecision(gl) {
     return out;
 }
 
-// GPU / WebGL details (unmasked renderer is very identifying)
+// Extra limits beyond the ones listed in getWebGLInfo(). A name the context does not define
+// (WebGL2-only constants on a WebGL1 context, for example) is skipped, not guessed.
+const WEBGL_EXTRA_LIMITS = {
+    webgl: [
+        "MAX_TEXTURE_IMAGE_UNITS", "MAX_COMBINED_TEXTURE_IMAGE_UNITS", "MAX_VERTEX_TEXTURE_IMAGE_UNITS",
+        "MAX_CUBE_MAP_TEXTURE_SIZE", "SUBPIXEL_BITS"
+    ],
+    webgl2: [
+        "MAX_TEXTURE_IMAGE_UNITS", "MAX_COMBINED_TEXTURE_IMAGE_UNITS", "MAX_VERTEX_TEXTURE_IMAGE_UNITS",
+        "MAX_CUBE_MAP_TEXTURE_SIZE", "SUBPIXEL_BITS",
+        "MAX_SAMPLES", "MAX_3D_TEXTURE_SIZE", "MAX_ARRAY_TEXTURE_LAYERS", "MAX_COLOR_ATTACHMENTS", "MAX_DRAW_BUFFERS",
+        "MAX_ELEMENTS_INDICES", "MAX_ELEMENTS_VERTICES", "MAX_FRAGMENT_INPUT_COMPONENTS", "MAX_VERTEX_OUTPUT_COMPONENTS",
+        "MAX_FRAGMENT_UNIFORM_COMPONENTS", "MAX_VERTEX_UNIFORM_COMPONENTS", "MAX_VARYING_COMPONENTS",
+        "MAX_PROGRAM_TEXEL_OFFSET", "MIN_PROGRAM_TEXEL_OFFSET", "MAX_TEXTURE_LOD_BIAS",
+        "MAX_UNIFORM_BUFFER_BINDINGS", "MAX_UNIFORM_BLOCK_SIZE", "UNIFORM_BUFFER_OFFSET_ALIGNMENT",
+        "MAX_VERTEX_UNIFORM_BLOCKS", "MAX_FRAGMENT_UNIFORM_BLOCKS", "MAX_COMBINED_UNIFORM_BLOCKS",
+        "MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS", "MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS",
+        "MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS", "MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS",
+        "MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS", "MAX_SERVER_WAIT_TIMEOUT"
+    ]
+};
+
+function glParameterValue(gl, name) {
+    if (gl[name] === undefined) return undefined;
+    try {
+        const v = gl.getParameter(gl[name]);
+        return ArrayBuffer.isView(v) ? Array.from(v) : v;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Releases a context instead of leaving it to garbage collection (browsers cap live contexts)
+function releaseGlContext(gl, canvas) {
+    try {
+        const lose = gl.getExtension("WEBGL_lose_context");
+        if (lose) lose.loseContext();
+    } catch (e) { /* ignore */ }
+    canvas.width = 0;
+    canvas.height = 0;
+}
+
+// GPU / WebGL details (unmasked renderer is very identifying).
+// out[type] stays null when no context could be made; out.availability says why:
+// "unsupported" (the interface does not exist) or "unavailable" (it exists but getContext failed).
 function getWebGLInfo() {
-    const out = {};
+    const out = { availability: {} };
     for (const type of ["webgl", "webgl2"]) {
+        const iface = type === "webgl" ? "WebGLRenderingContext" : "WebGL2RenderingContext";
         const canvas = document.createElement("canvas");
-        const gl = canvas.getContext(type);
-        if (!gl) { out[type] = null; continue; }
+        const gl = typeof window[iface] === "undefined" ? null : canvas.getContext(type);
+        if (!gl) {
+            out[type] = null;
+            out.availability[type] = typeof window[iface] === "undefined"
+                ? { status: "unsupported", reason: `${iface} is not defined` }
+                : { status: "unavailable", reason: "getContext returned null (WebGL disabled, GPU blocklisted or context limit reached)" };
+            continue;
+        }
         const dbg = gl.getExtension("WEBGL_debug_renderer_info");
         const attrs = gl.getContextAttributes() || {};
+        const extensions = gl.getSupportedExtensions() || [];
+
+        // Limits added to the original list
+        const extraLimits = {};
+        for (const name of WEBGL_EXTRA_LIMITS[type]) {
+            const value = glParameterValue(gl, name);
+            if (value !== undefined) extraLimits[name] = value;
+        }
+
+        // Limits that only exist when an extension is enabled
+        const anisotropy = gl.getExtension("EXT_texture_filter_anisotropic");
+        const drawBuffers = gl.getExtension("WEBGL_draw_buffers");
+        const extensionLimits = {
+            maxTextureAnisotropy: anisotropy ? gl.getParameter(anisotropy.MAX_TEXTURE_MAX_ANISOTROPY_EXT) : null,
+            maxDrawBuffersExt: drawBuffers ? gl.getParameter(drawBuffers.MAX_DRAW_BUFFERS_WEBGL) : null,
+            maxColorAttachmentsExt: drawBuffers ? gl.getParameter(drawBuffers.MAX_COLOR_ATTACHMENTS_WEBGL) : null,
+            compressedTextureFormats: (() => {
+                try { return Array.from(gl.getParameter(gl.COMPRESSED_TEXTURE_FORMATS) || []).sort((x, y) => x - y); }
+                catch (e) { return null; }
+            })()
+        };
+
+        // Multisample counts the hardware offers for an RGBA8 renderbuffer (WebGL2 only)
+        let rgba8Samples = null;
+        if (type === "webgl2") {
+            try { rgba8Samples = Array.from(gl.getInternalformatParameter(gl.RENDERBUFFER, gl.RGBA8, gl.SAMPLES)); }
+            catch (e) { rgba8Samples = null; }
+        }
+
         out[type] = {
             version: gl.getParameter(gl.VERSION),
             shadingLanguageVersion: gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
@@ -613,8 +766,34 @@ function getWebGLInfo() {
             aliasedLineWidthRange: Array.from(gl.getParameter(gl.ALIASED_LINE_WIDTH_RANGE)),
             aliasedPointSizeRange: Array.from(gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)),
             shaderPrecision: getShaderPrecision(gl),
-            extensions: gl.getSupportedExtensions()
+            extensions: gl.getSupportedExtensions(),
+            // added: texture units, MAX_SAMPLES and the other WebGL2 limits, extension limits
+            limits: extraLimits,
+            maxSamples: extraLimits.MAX_SAMPLES ?? null,
+            rgba8RenderbufferSamples: rgba8Samples,
+            extensionLimits,
+            // What the default framebuffer got for the attributes requested above. This follows
+            // the context attributes and the display, so treat it as configuration, not hardware.
+            defaultFramebuffer: {
+                redBits: gl.getParameter(gl.RED_BITS), greenBits: gl.getParameter(gl.GREEN_BITS),
+                blueBits: gl.getParameter(gl.BLUE_BITS), alphaBits: gl.getParameter(gl.ALPHA_BITS),
+                depthBits: gl.getParameter(gl.DEPTH_BITS), stencilBits: gl.getParameter(gl.STENCIL_BITS),
+                samples: gl.getParameter(gl.SAMPLES)
+            }
         };
+        out.availability[type] = { status: "success", reason: null, extensionCount: extensions.length };
+        releaseGlContext(gl, canvas);
+    }
+
+    // A context requested with failIfMajorPerformanceCaveat is refused when the browser would
+    // fall back to a software renderer, so this separates hardware from software rendering.
+    out.hardwareAcceleration = {};
+    for (const type of ["webgl", "webgl2"]) {
+        if (!out[type]) { out.hardwareAcceleration[type] = null; continue; }
+        const canvas = document.createElement("canvas");
+        const gl = canvas.getContext(type, { failIfMajorPerformanceCaveat: true });
+        out.hardwareAcceleration[type] = !!gl;
+        if (gl) releaseGlContext(gl, canvas);
     }
     return out;
 }
@@ -711,7 +890,12 @@ async function getStorageAndPower() {
     const out = { storage: null, battery: null, jsHeap: null };
     if (navigator.storage && navigator.storage.estimate) {
         const e = await navigator.storage.estimate();
-        out.storage = { quota: e.quota ?? null, usage: e.usage ?? null };
+        // usage changes as sites store data: it is not a device identifier
+        out.storage = { quota: e.quota ?? null, usage: e.usage ?? null, usageIsVolatile: true };
+        if (navigator.storage.persisted) {
+            try { out.storage.persisted = await navigator.storage.persisted(); }
+            catch (e2) { out.storage.persisted = null; }
+        }
     }
     if (navigator.getBattery) {
         const b = await navigator.getBattery();
@@ -1439,22 +1623,6 @@ async function getTextRenderingInfo() {
 // H. WebGPU rendering, CSS feature support
 // ---------------------------------------------------------------------------
 
-// SHA-256 of raw bytes (falls back to cyrb53 where crypto.subtle is unavailable)
-async function hashBytes(bytes) {
-    if (window.crypto && crypto.subtle) {
-        const buf = await crypto.subtle.digest("SHA-256", bytes);
-        return {
-            algorithm: "SHA-256",
-            value: Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("")
-        };
-    }
-    let s = "";
-    for (let i = 0; i < bytes.length; i += 8192) {
-        s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
-    }
-    return { algorithm: "cyrb53", value: cyrb53(s) };
-}
-
 const WEBGPU_RENDER_SHADER = `
 struct VOut {
     @builtin(position) pos: vec4f,
@@ -1867,6 +2035,259 @@ async function getCssFeatures() {
 }
 
 // ---------------------------------------------------------------------------
+// I. Test harness: statuses, canonical serialization, categories, correlation
+// ---------------------------------------------------------------------------
+
+// Every test registered below ends in exactly one of four states:
+//   success      the test ran and produced measurements
+//   unsupported  the browser does not implement the API at all
+//   unavailable  the API exists but cannot be used here (blocked by policy, needs a
+//                secure context / permission / cross-origin isolation, or no hardware)
+//   failed       the test threw, timed out or gave an inconsistent result
+// Nothing in here records how long anything took: timing is never a matching signal.
+class TestSignal extends Error {
+    constructor(status, reason) {
+        super(reason);
+        this.name = "TestSignal";
+        this.status = status;
+        this.reason = reason;
+    }
+}
+const unsupported = (reason) => { throw new TestSignal("unsupported", reason); };
+const unavailable = (reason) => { throw new TestSignal("unavailable", reason); };
+
+// Browsers report policy and permission blocks with these error names
+const BLOCKED_ERRORS = new Set(["SecurityError", "NotAllowedError"]);
+
+function classifyError(e) {
+    if (e instanceof TestSignal) return { status: e.status, reason: e.reason, error: null };
+    if (e && BLOCKED_ERRORS.has(e.name)) {
+        return { status: "unavailable", reason: `blocked: ${e.name}`, error: String(e) };
+    }
+    const timedOut = /timed out/.test(String((e && e.message) || ""));
+    return { status: "failed", reason: timedOut ? "timeout" : "exception", error: String(e) };
+}
+
+// Sub-measurements inside one test use the same status vocabulary (no hashing).
+// fn must return a plain object; its fields are merged into { status: "success" }.
+async function runSub(fn) {
+    try {
+        return { status: "success", ...(await fn()) };
+    } catch (e) {
+        const c = classifyError(e);
+        return { status: c.status, reason: c.reason, error: c.error };
+    }
+}
+
+// Canonical serialization for hashing. Unlike JSON.stringify it sorts object keys,
+// keeps -0 / NaN / Infinity / BigInt distinct instead of turning them into 0 / null,
+// and drops undefined and function values. Same value in, same text out.
+function stableStringify(value) {
+    const enc = (v) => {
+        if (v === null || v === undefined) return "null";
+        switch (typeof v) {
+            case "number": return Number.isFinite(v) ? fmtNum(v) : String(v);
+            case "bigint": return `${v}n`;
+            case "boolean": return v ? "true" : "false";
+            case "string": return JSON.stringify(v);
+            case "function": case "symbol": return "null";
+        }
+        if (ArrayBuffer.isView(v) && !(v instanceof DataView)) {
+            return `${v.constructor.name}[${Array.from(v, enc).join(",")}]`;
+        }
+        if (Array.isArray(v)) return `[${v.map(enc).join(",")}]`;
+        if (v instanceof Date) return JSON.stringify(v.toISOString());
+        if (v instanceof Set) return `Set[${Array.from(v, enc).sort().join(",")}]`;
+        if (v instanceof Map) {
+            return `Map{${Array.from(v, ([k, x]) => `${enc(k)}:${enc(x)}`).sort().join(",")}}`;
+        }
+        const keys = Object.keys(v)
+            .filter((k) => v[k] !== undefined && typeof v[k] !== "function")
+            .sort();
+        return `{${keys.map((k) => `${JSON.stringify(k)}:${enc(v[k])}`).join(",")}}`;
+    };
+    return enc(value);
+}
+
+async function hashValue(value) {
+    return hashString(stableStringify(value));
+}
+
+// Rounds to a fixed number of decimals so tiny float noise does not split a bucket
+const roundTo = (n, digits = 4) =>
+    typeof n === "number" && Number.isFinite(n) ? Number(n.toFixed(digits)) : null;
+
+// Tests register themselves here when their script loads. fingerprint-lib.js must be
+// loaded first. Fields:
+//   id        key under result.tests
+//   category  "static" | "configuration" | "behavioral"
+//   groups    correlation groups this test belongs to (see FP_CORRELATION_GROUPS)
+//   run       async (ctx) => { raw, normalized, hashes?, notes? }, ctx = { result, opts }
+//   optIn     optional name of an option that must be true (permission prompts)
+//   timeoutMs optional, default 10000
+const FP_TEST_REGISTRY = [];
+const registerTest = (test) => { FP_TEST_REGISTRY.push(test); };
+
+/**
+ * A test's run() returns:
+ *   raw        everything measured, including diagnostics and volatile values
+ *   normalized only the stable part: sorted, bucketed or quantized. This is what is hashed.
+ *   hashes     optional { name: value } of extra named hashes (kept separate on purpose,
+ *              e.g. supported / smooth / powerEfficient)
+ *   notes      optional strings explaining caveats
+ */
+async function runRegisteredTest(test, ctx) {
+    const base = { id: test.id, category: test.category, groups: test.groups || [] };
+    if (test.optIn && !ctx.opts[test.optIn]) {
+        return {
+            ...base, status: "unavailable", reason: `opt-in required (${test.optIn})`, error: null,
+            raw: null, normalized: null, hashAlgorithm: null, hash: null
+        };
+    }
+    try {
+        const out = await withTimeout(Promise.resolve().then(() => test.run(ctx)), test.timeoutMs || 10000, test.id);
+        const normalized = out.normalized === undefined ? null : out.normalized;
+        const hash = await hashValue(normalized);
+        const entry = {
+            ...base, status: "success", reason: null, error: null,
+            raw: out.raw === undefined ? null : out.raw,
+            normalized,
+            hashAlgorithm: hash.algorithm,
+            hash: hash.value
+        };
+        if (out.hashes) {
+            entry.hashes = {};
+            for (const [name, v] of Object.entries(out.hashes)) entry.hashes[name] = (await hashValue(v)).value;
+        }
+        if (out.notes && out.notes.length) entry.notes = out.notes;
+        return entry;
+    } catch (e) {
+        return {
+            ...base, ...classifyError(e),
+            raw: null, normalized: null, hashAlgorithm: null, hash: null
+        };
+    }
+}
+
+// Which older (pre-harness) result keys belong to which category, and which part of
+// them is stable enough to hash. Anything volatile (latencies, viewport size, battery,
+// storage usage, IPs, permissions) is left out of these views.
+function legacyStableViews(result) {
+    const audio = result.audio || {};
+    const output = audio.output && !audio.output.error ? audio.output : null;
+    return {
+        static: {
+            clientHints: result.clientHints,
+            apis: result.apis,
+            webrtc: result.webrtc,
+            webgl: result.webgl,
+            webgpu: result.webgpu,
+            codecs: result.codecs,
+            plugins: result.plugins,
+            fonts: result.fonts,
+            audioSupport: audio.support,
+            cssFeatures: result.cssFeatures && result.cssFeatures.hash
+        },
+        configuration: {
+            browser: result.browser,
+            screen: result.display && result.display.screen,
+            devicePixelRatio: result.display && result.display.devicePixelRatio,
+            hardware: result.hardware,
+            prefsAndLocale: result.prefsAndLocale,
+            // volatile (orientation, display mode, overflow) is window state
+            mediaFeatures: result.mediaFeatures && { ...result.mediaFeatures, volatile: undefined },
+            speechVoices: result.speechVoices,
+            // sampleRate follows the output device; latencies and state are session-dependent
+            audioOutput: output && { sampleRate: output.sampleRate, destination: output.destination, analyser: output.analyser }
+        },
+        behavioral: {
+            canvas: result.canvas && result.canvas.hash,
+            audioFingerprint: audio.fingerprint,
+            webgpuRendering: result.webgpuRendering && result.webgpuRendering.hash,
+            jsEngine: result.jsEngine && result.jsEngine.hash,
+            textRendering: result.textRendering && result.textRendering.hash
+        }
+    };
+}
+
+// Characteristics that move together. Entropy from members of one group must not be
+// added up as if they were independent: the same GPU explains WebGL strings, WebGL
+// rendering, WebGPU adapter and codec acceleration at once.
+// "legacy" lists older result keys, tests lists ids under result.tests (a test also
+// joins a group through its own `groups` field).
+const FP_CORRELATION_GROUPS = {
+    gpu: { legacy: ["webgl", "webgpu", "webgpuRendering"], description: "GPU, driver and graphics stack" },
+    browserEngine: { legacy: ["browser", "clientHints", "apis", "cssFeatures", "jsEngine", "codecs"], description: "Browser build and JavaScript engine" },
+    operatingSystem: { legacy: ["fonts", "textRendering", "speechVoices"], description: "OS fonts, text stack and language packs" },
+    audioStack: { legacy: ["audio"], description: "Audio engine and output device" },
+    display: { legacy: ["display", "mediaFeatures"], description: "Screen, window and display preferences" },
+    locale: { legacy: ["prefsAndLocale"], description: "Language, region and time settings" },
+    cpu: { legacy: ["jsEngine"], description: "CPU architecture and floating-point behaviour" }
+};
+
+async function hashEntries(entries) {
+    // entries: { name: value }, undefined values are dropped by stableStringify
+    return (await hashValue(entries)).value;
+}
+
+// Builds result.characteristics from result.tests and the legacy keys
+async function buildCharacteristics(result) {
+    const tests = result.tests || {};
+    const legacy = legacyStableViews(result);
+    const out = {
+        schema: 1,
+        serialization: "stable-json (sorted keys; -0, NaN, Infinity and BigInt preserved), SHA-256",
+        notes: [
+            "Categories are hashed separately on purpose. A change in one category (for example a new monitor in configuration) says nothing about the others.",
+            "Tests that did not succeed are excluded from the hashes and listed under excluded, so a transient failure never changes a hash.",
+            "Members of a correlation group describe the same underlying component. Do not count them as independent signals.",
+            "A different hash does not prove a different device, and the same hardware can render differently after a browser, driver or OS update."
+        ]
+    };
+
+    for (const category of ["static", "configuration", "behavioral"]) {
+        const members = {};
+        const excluded = [];
+        for (const [key, value] of Object.entries(legacy[category])) {
+            if (value === undefined) { excluded.push({ id: key, reason: "not collected" }); continue; }
+            if (value && value.error) { excluded.push({ id: key, reason: "collector error" }); continue; }
+            members[`legacy:${key}`] = (await hashValue(value)).value;
+        }
+        for (const t of Object.values(tests)) {
+            if (t.category !== category) continue;
+            // unsupported is a stable fact about the browser; failures and blocks are not
+            if (t.status === "success") members[`test:${t.id}`] = t.hash;
+            else if (t.status === "unsupported") members[`test:${t.id}`] = "unsupported";
+            else excluded.push({ id: t.id, reason: `${t.status}: ${t.reason}` });
+        }
+        out[category] = {
+            members: Object.keys(members).sort(),
+            excluded,
+            hash: await hashEntries(members)
+        };
+    }
+
+    out.correlationGroups = {};
+    for (const [name, def] of Object.entries(FP_CORRELATION_GROUPS)) {
+        const members = {};
+        for (const key of def.legacy) {
+            const v = result[key];
+            if (v === undefined || (v && v.error)) continue;
+            members[`legacy:${key}`] = (await hashValue(key === "display" ? v.screen : key === "mediaFeatures" ? { ...v, volatile: undefined } : v)).value;
+        }
+        for (const t of Object.values(tests)) {
+            if (t.status === "success" && t.groups.includes(name)) members[`test:${t.id}`] = t.hash;
+        }
+        out.correlationGroups[name] = {
+            description: def.description,
+            members: Object.keys(members).sort(),
+            hash: await hashEntries(members)
+        };
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // Entry point: call this from your "Start fingerprint" button
 // ---------------------------------------------------------------------------
 
@@ -1885,6 +2306,7 @@ async function safe(fn) {
  *   network: true,          // what this server sees (IP, headers) + WebRTC STUN candidates
  *   serverUrl: '/fingerprint/info', // endpoint that reports the request as the server received it
  *   geolocation: false,     // precise location; triggers a browser permission prompt
+ *   screenDetails: false,   // getScreenDetails(): multi-screen info; may trigger a permission prompt
  *   stunServers: [...],     // optional STUN URLs
  *   onProgress: (name) => {} // optional progress callback
  * })
@@ -1894,6 +2316,7 @@ async function runFingerprint(options = {}) {
         consent: false,
         network: true,
         geolocation: false,
+        screenDetails: false,
         stunServers: ["stun:stun.l.google.com:19302"],
         serverUrl: "/fingerprint/info",
         onProgress: null,
@@ -1952,6 +2375,16 @@ async function runFingerprint(options = {}) {
         networkInfo: await step("network info", getNetworkInfo)
     };
 
+    // Tests registered by the other fingerprint-*.js scripts. Each has its own status,
+    // raw and normalized data and hash; see runRegisteredTest().
+    result.tests = {};
+    for (const test of FP_TEST_REGISTRY) {
+        if (typeof opts.onProgress === "function") {
+            try { opts.onProgress(test.id); } catch (e) { /* ignore */ }
+        }
+        result.tests[test.id] = await runRegisteredTest(test, { result, opts });
+    }
+
     if (opts.network) {
         result.serverView = await step("server view", () => getServerView(opts.serverUrl));
         result.webrtcIPs = await step("webrtc ip candidates",
@@ -1970,7 +2403,14 @@ async function runFingerprint(options = {}) {
         clientHints: result.clientHints,
         screen: result.display && result.display.screen,
         canvas: result.canvas,
-        audio: result.audio,
+        // latencies and state follow the output device and session, so they are not part of it
+        audio: result.audio && {
+            support: result.audio.support,
+            output: result.audio.output && !result.audio.output.error
+                ? { ...result.audio.output, state: undefined, baseLatency: undefined, outputLatency: undefined }
+                : result.audio.output,
+            fingerprint: result.audio.fingerprint
+        },
         hardware: result.hardware,
         apis: result.apis,
         webrtc: result.webrtc,
@@ -1990,7 +2430,12 @@ async function runFingerprint(options = {}) {
         jsEngine: result.jsEngine && result.jsEngine.hash,
         textRendering: result.textRendering && result.textRendering.hash
     };
+    // Legacy single hash, kept for compatibility. It mixes categories that change for different
+    // reasons and treats correlated signals as independent: prefer result.characteristics.
     result.combinedHash = await hashString(JSON.stringify(stable));
+
+    // Static / configuration / behavioral hashes and correlation groups
+    result.characteristics = await safe(() => buildCharacteristics(result));
 
     return result;
 }

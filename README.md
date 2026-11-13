@@ -71,6 +71,7 @@ SESSION_SECRET=change-me-to-a-long-random-string
 | `DATABASE_URL` | Postgres connection string, used by Prisma and the session store |
 | `SESSION_SECRET` | Secret used to sign the session cookie |
 | `TLS_KEY_FILE`, `TLS_CERT_FILE` | Optional. Paths to a PEM private key and certificate. When both are set the server speaks HTTPS itself and fingerprints every TLS handshake (set `PROTOCOL=https` too). Leave unset to serve plain HTTP, for example behind a proxy that terminates TLS. |
+| `FP_CROSS_ORIGIN_ISOLATION` | Optional. Set to `1` to send COOP/COEP with `/fingerprint` so thread tests can run. |
 
 Generate a good secret with:
 
@@ -102,7 +103,7 @@ node server.js
 |---|---|
 | `npm run dev` | Start the server with nodemon |
 | `npm run contract:emit` | Runs `prisma contract emit` |
-| `npm test` | Placeholder, no tests yet |
+| `npm test` | Node tests for the browser-independent parts of the fingerprint scripts |
 
 ## Project Structure
 
@@ -217,7 +218,8 @@ Files under `/src/...` are looked up first in `resources/public/`, then in `reso
 - `images/authenticated/fingerprint.html` is the page.
 - `resources/private/fingerprint-lib.js` holds the collectors and exposes `runFingerprint(options)` and `FINGERPRINT_WARNING`.
 - `routes/fingerprint.js` provides `GET /fingerprint/info` (see Fingerprint API above).
-- `resources/private/fingerprint.js` wires the page's checkbox and button to the library.
+- `resources/private/fingerprint-wasm.js`, `fingerprint-media.js`, `fingerprint-text.js` and `fingerprint-env.js` hold the newer tests (see "Tests, statuses and characteristics"). They are loaded after `fingerprint-lib.js` and register their tests with it.
+- `resources/private/fingerprint.js` wires the page's checkboxes and button to the library.
 - `resources/private/fingerprint.css` adds the layout on top of `style.css`.
 
 `runFingerprint({ consent: true })` throws unless `consent` is exactly `true`, so only pass it after the user has seen `FINGERPRINT_WARNING`. Options:
@@ -228,6 +230,7 @@ Files under `/src/...` are looked up first in `resources/public/`, then in `reso
 | `network` | `true` | Fetches what this server sees about the request (IP, headers, TLS) from `serverUrl`, gathers WebRTC candidates from a STUN server (a third party), and runs consistency checks between the two. |
 | `serverUrl` | `/fingerprint/info` | Endpoint used for the server's view of the request. |
 | `geolocation` | `false` | Requests precise location; the browser shows a permission prompt. |
+| `screenDetails` | `false` | Runs the `screenDetails` test (`getScreenDetails()`), which can show a permission prompt. Without it the test reports `unavailable`. |
 | `stunServers` | Google STUN | STUN URLs used for the WebRTC test. |
 | `onProgress` | none | Called with the name of each step as it starts. |
 
@@ -254,6 +257,54 @@ The old per-query entries (`darkMode`, `reducedMotion`, `reducedTransparency`, `
 `consistency` also compares the `Sec-CH-UA-Arch`, `Sec-CH-UA-Bitness`, `Sec-CH-UA-Platform-Version` and `Sec-CH-Prefers-Color-Scheme` headers with what the browser reports through JavaScript (`null` when the header wasn't sent).
 
 `combinedHash` covers the device traits that should stay stable between runs, now including `webgpu`, `webgpuRendering` and `cssFeatures` hashes, `mediaFeatures` (minus `volatile`), `jsEngine.hash` and `textRendering.hash`. The TLS fingerprint is not part of it, because it describes the connection rather than the device. Text metrics can shift with browser zoom or font changes, so treat the hash as a similarity aid rather than an identity.
+
+### Tests, statuses and characteristics
+
+The newer collectors are registered tests rather than plain functions. `result.tests.<id>` holds one entry per test:
+
+```
+{ id, category, groups, status, reason, error, raw, normalized, hashAlgorithm, hash, hashes?, notes? }
+```
+
+- `status` is exactly one of `success`, `unsupported` (the browser has no such API), `unavailable` (the API exists but cannot be used: blocked, insecure context, permissions policy, no hardware, opt-in not given) or `failed` (an exception, a timeout, or a result that contradicts a reference). `reason` says why.
+- `raw` is everything measured, including diagnostics and volatile values. `normalized` is only the stable part (sorted, bucketed or quantized) and is what `hash` covers. `hashes` holds extra named hashes that are kept apart on purpose.
+- Nothing records how long anything took. Timing is never a matching signal.
+- All new hashes are SHA-256 over a canonical serialization (`stableStringify`: sorted keys, `-0`/`NaN`/`Infinity`/BigInt preserved). Without `crypto.subtle` (plain HTTP) a pure-JS SHA-256 is used, so values are comparable across contexts. This replaces the old cyrb53 fallback.
+
+| Test | Category | What it does |
+|---|---|---|
+| `audioCapabilities` | static | Audio interfaces and prototype members, node factories, which offline sample rates / channel counts / node enumerations are accepted. No device is opened. |
+| `audioRendering` | behavioral | Two fixed `OfflineAudioContext` graphs (oscillator → compressor, and automation → biquad → compressor), each rendered twice. Raw Float32 SHA-256 (`hashes.rawSamples`), peak-normalized 16-bit SHA-256 (`quantizedSha256`), stats. `deterministic: false` means the browser adds noise and that variant contributes no hash. Sample rate and latencies stay in `audio.output` (configuration, volatile). |
+| `webglRendering` | behavioral | For WebGL1 and WebGL2: an offscreen 128x64 framebuffer of eight 32x32 tiles (highp / mediump / lowp float maths, bilinear and mipmapped texture sampling, three blend set-ups), read with `readPixels`. Raw and quantized SHA-256 per tile and per frame. All GL resources are deleted and the context released. |
+| `fontAnalysis` | static | `document.fonts.check()` (compared with a control family, never treated as evidence), canvas and DOM measurements in five scripts, glyph raster hashes and missing-glyph checks. Names that measure identically are one cluster; use `independentFaces`, not the number of names that responded. |
+| `hardwareEnvironment` | static | `deviceMemory`, `hardwareConcurrency`. |
+| `browserSettings` | configuration | `cookieEnabled`, `doNotTrack`, `globalPrivacyControl`, `pdfViewerEnabled`. |
+| `storageEnvironment` | configuration | Quota as a power-of-two bucket, `persisted()`, OPFS presence. `usage` is raw only. |
+| `screenDetails` | configuration, opt-in | `getScreenDetails()` when the `screenDetails` option is on. Normalized keeps count and zoom-independent pixel sizes. |
+| `wasmCapabilities` | static | Validation of modules using SIMD, relaxed SIMD, atomics/shared memory, bulk memory, reference types, multi-value, tail calls, exceptions, GC, memory64 and more, plus shared-memory and Worker thread execution. |
+| `wasmComputation` | behavioral | i32, i64, f32, f64, saturating conversion and SIMD programs, each checked against a JavaScript reference. `normalized` holds only exactly-specified results; `hashes.implementationDefined` holds NaN bits and relaxed-SIMD results, which depend on the CPU and engine. |
+| `apiAvailability` | static | WebUSB, WebBluetooth, WebSerial, WebHID, WebXR, MediaDevices, device orientation and motion, `SharedArrayBuffer`, `crossOriginIsolated`: exposure, secure-context and permissions-policy state. |
+| `deviceAvailability` | configuration | Prompt-free hardware probes: already-granted USB/serial/HID devices, Bluetooth adapter, XR session support, media device counts, whether sensor events carry data. |
+| `mediaCapabilities` | static | A fixed grid of `decodingInfo()` configs (10 video codecs x 6 resolutions, media-source at 1080p30, 6 audio codecs) and WebCodecs `isConfigSupported` with three hardware-acceleration modes, plus `ImageDecoder` types. `supported` is hashed; `smooth` and `powerEfficient` have their own hashes (`hashes.smooth`, `hashes.powerEfficient`) because they can depend on playback history and power state. |
+| `indexedDbBehavior`, `cacheApiBehavior` | behavioral | Round trips and key types through a temporary database / cache that is deleted afterwards. |
+| `compressionBehavior` | behavioral | Formats accepted by `CompressionStream` and the exact bytes produced for a fixed input. |
+| `regexpBehavior` | behavioral | Feature support, case-folding and error text on fixed inputs. |
+| `intlData` | static | `Intl` output for fixed locales and a fixed instant (ICU/CLDR data of the build). |
+| `localeSettings`, `timezoneBehavior` | configuration | The user's own locale formatting; offsets at fixed past/future instants, this year's transitions, Intl-versus-Date agreement and date parsing. |
+
+Existing keys keep their shape. Additions to them: `display.visualViewport` and `display.normalized` (zoom-independent device pixels; viewport stays separate from `display.screen`), `webgl.availability`, `webgl.hardwareAcceleration` and many more limits per context (`limits`, `maxSamples`, `rgba8RenderbufferSamples`, `extensionLimits`, `defaultFramebuffer`; contexts are now released), `storageAndPower.storage.persisted`, and a `volatile` note on `audio.output`.
+
+`result.characteristics` groups everything by how it behaves:
+
+- `static`, `configuration` and `behavioral` each list their members, the tests that were excluded (and why) and one `hash`. Tests that did not succeed never change a hash; `unsupported` does, because it is a stable fact.
+- `correlationGroups` (`gpu`, `browserEngine`, `operatingSystem`, `audioStack`, `display`, `locale`, `cpu`) list members that describe the same component. Do not add up their entropy as if independent.
+- `combinedHash` is kept for compatibility but no longer includes audio state and latencies. Prefer `characteristics`.
+
+A different hash does not prove a different device, and identical hardware can render differently after a browser, driver or OS update. `deterministic: false` and `intlAgreesWithDate: false` point to noise injection or spoofing rather than to a new device.
+
+Thread tests need `SharedArrayBuffer`, which browsers only expose to cross-origin isolated pages. Set `FP_CROSS_ORIGIN_ISOLATION=1` to send COOP/COEP with `/fingerprint`. It is off by default because it changes `crossOriginIsolated` and the environment being measured.
+
+Run `npm test` for the checks that need no browser (hashing, serialization, status handling, the WebAssembly programs against JavaScript references, and stubbed audio/WebGL runs). Rendering, fonts, MediaCapabilities and the screen/device probes can only be verified in real browsers.
 
 ## Database
 

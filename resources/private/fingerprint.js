@@ -5,6 +5,7 @@
   const ok = $('ok');
   const optNetwork = $('opt-network');
   const optGeo = $('opt-geo');
+  const optScreens = $('opt-screens');
   const start = $('start');
   const status = $('status');
   const out = $('out');
@@ -28,6 +29,7 @@
         consent: ok.checked,
         network: optNetwork.checked,
         geolocation: optGeo.checked,
+        screenDetails: optScreens.checked,
         onProgress: (name) => {
           status.textContent = `Collecting: ${name}...`;
         }
@@ -42,3 +44,8 @@
     }
   });
 })();
+
+
+document.querySelectorAll("div").forEach(el => { 
+  el.style.userSelect = 'auto';
+})

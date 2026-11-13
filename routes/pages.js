@@ -34,6 +34,13 @@ router.get("/fingerprint", authenticate, (req, res) => {
     // Browsers only act on Accept-CH from navigation responses, so this is where it
     // has to be sent for the extra client hints to reach /fingerprint/info
     res.set("Accept-CH", ACCEPT_CH);
+    // Optional: make the page cross-origin isolated so SharedArrayBuffer and the WebAssembly
+    // thread test can run. Off by default because it changes the environment being measured
+    // (it flips crossOriginIsolated and the availability of SharedArrayBuffer).
+    if (process.env.FP_CROSS_ORIGIN_ISOLATION === "1") {
+        res.set("Cross-Origin-Opener-Policy", "same-origin");
+        res.set("Cross-Origin-Embedder-Policy", "require-corp");
+    }
     res.sendFile(sendPrivate("fingerprint.html"));
 })
 
