@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Saved fingerprints</title>
+    <link rel="stylesheet" href="/src/style.css">
+    <link rel="stylesheet" href="/src/fingerprint.css">
+    <link rel="stylesheet" href="/src/history.css">
+</head>
+<body>
+    <main class="card fp-card">
+        <h1>Saved fingerprints</h1>
+        <p class="muted">Fingerprints you saved to your account. Only you can see them.</p>
+
+        <div class="actions">
+            <a class="button" href="/fingerprint">Run a new fingerprint</a>
+            <a class="button secondary" href="/dashboard">Dashboard</a>
+        </div>
+
+        <section id="latest" class="cmp-box" hidden>
+            <h2>Newest vs previous</h2>
+            <div id="latest-body"></div>
+        </section>
+
+        <div class="cmp-toolbar">
+            <button id="compare" type="button" disabled>Compare selected</button>
+            <span id="compare-hint" class="muted">Tick two fingerprints below to compare them.</span>
+        </div>
+        <section id="compare-panel" class="cmp-box" hidden>
+            <h2>Comparison</h2>
+            <div id="compare-body"></div>
+        </section>
+
+        <p id="status" class="fp-status" role="status"></p>
+        <ul id="list" class="hist-list"></ul>
+        <button id="more" type="button" class="secondary" hidden>Load more</button>
+    </main>
+
+    <script src="/src/history.js"></script>
+</body>
+</html>

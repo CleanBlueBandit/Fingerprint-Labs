@@ -13,7 +13,9 @@ A starter template for web apps. It ships with session-based authentication and 
 - **Public vs. authenticated static assets**, with auth enforced for private files
 - **Colorized request logger** and **graceful shutdown** (SIGINT/SIGTERM)
 - **Custom error pages** generated from HTTP status codes (including `/coffee` → 418)
-- **Browser fingerprint test page** at `/fingerprint` (runs entirely in the browser, behind a consent checkbox)
+- **Browser fingerprint test page** at `/fingerprint` (runs in the browser, behind a consent checkbox)
+- **Saved fingerprints**: save a result to your account and view, copy or delete past ones at `/history`
+- **Fingerprint comparison**: a weighted similarity score between any two saved fingerprints, and between your newest and the one before it
 
 ## Tech Stack
 
@@ -113,15 +115,17 @@ node server.js
 ├── helpers.js               # sendPublic / sendPrivate / fileExists path helpers
 ├── prisma7.config.ts        # Prisma 7 config (schema path, migrations, datasource)
 ├── prisma/
-│   └── schema.prisma        # Database schema (User model)
+│   └── schema.prisma        # Database schema (User and BrowserFingerprint models)
 ├── db/
 │   └── prisma.js            # Shared PrismaClient using the pg driver adapter
 ├── lib/
+│   ├── fingerprint-compare.js # Weighted similarity between two saved fingerprints
+│   ├── fingerprint-store.js # Hash extraction and payload sanitising for saved fingerprints
 │   └── tls-fingerprint.js   # TLS ClientHello parser, JA3/JA4, and the TCP wrapper that captures them
 ├── routes/
 │   ├── auth.js              # POST /auth/register, /auth/login, /auth/logout; GET /auth/me
 │   ├── pages.js             # HTML page routes (/, /login, /register, /dashboard, /fingerprint, /coffee)
-│   ├── fingerprint.js       # GET /fingerprint/info: what the server sees about the request
+│   ├── fingerprint.js       # GET /fingerprint/info, plus the /fingerprint/saved save/list/get/delete API
 │   ├── resources.js         # Static assets served under /src
 │   └── middleware.js        # authenticate, authenticateReturn, requestLogger
 ├── error/
@@ -146,6 +150,7 @@ node server.js
 | GET | `/register` | No | `images/public/register.html` |
 | GET | `/dashboard` | Yes | `images/authenticated/dashboard.html` (shows the current user from `/auth/me`, links to the fingerprint test, log out button) |
 | GET | `/fingerprint` | Yes | `images/authenticated/fingerprint.html` |
+| GET | `/history` | Yes | `images/authenticated/history.html` (your saved fingerprints: copy hashes or the full JSON, view, delete) |
 | GET | `/coffee` | No | 418 "I'm a teapot" error page |
 
 Unauthenticated requests to protected pages are redirected (307) to `/login`.
@@ -202,6 +207,36 @@ The `/fingerprint` page response and the `/fingerprint/info` response both inclu
 
 JA3 is the MD5 of `version,ciphers,extensions,groups,pointFormats` with GREASE removed. Chromium shuffles the extension order on each connection, so its JA3 changes between connections; JA4 sorts ciphers and extensions, so it stays stable. The JA4 code was checked against the published Chrome values (cipher hash `8daaf6152771`, extension hash `e5627efa2ab1`), and the JA3 code against the JA3 project's sample vector.
 
+### Saved fingerprints API
+
+A fingerprint is only stored when the user presses **Save to my account** on the test page. These endpoints require a session (`401` otherwise) and only ever touch the logged-in user's own rows (another user's id returns `404`).
+
+| Method | Path | Body / query | Response |
+|---|---|---|---|
+| POST | `/fingerprint/saved` | `{ data }`: the object returned by `runFingerprint()` | `201` with `{ ok, fingerprint }` (id, createdAt, hashes). `400` for a missing or non-object `data`, `409` once the user holds 200 saved fingerprints, `413` above 5 MB, `429` above 10 per minute |
+| GET | `/fingerprint/saved` | `?limit=50` (1-100), `?cursor=<id>` | `{ ok, fingerprints: [...], nextCursor }`, newest first, hashes only (no payload) |
+| GET | `/fingerprint/saved/:id` | none | `{ ok, fingerprint: { ..., data } }` with the full payload |
+| DELETE | `/fingerprint/saved/:id` | none | `{ ok, message }` |
+| GET | `/fingerprint/saved/compare/latest` | none | `{ ok, comparison, saved }`: the newest saved fingerprint compared with the one saved before it. `comparison` is `null` when fewer than two are saved |
+| GET | `/fingerprint/saved/compare` | `?a=<id>&b=<id>` | `{ ok, comparison }` for any two of your saved fingerprints. `400` for missing, invalid or identical ids, `404` if either is not yours |
+
+`POST /fingerprint/saved` also returns a `comparison` against the previously saved fingerprint (or `null` for the first one).
+
+### Comparing fingerprints
+
+`lib/fingerprint-compare.js` splits each saved result into about 30 named components plus every registered test, scores each between 0 and 1, and returns the weighted average as a percentage.
+
+- **Weights** (0-10) are in one table at the top of the file. High: canvas (8), installed fonts (8), WebGL (9), WebGL and WebGPU rendering (6), audio fingerprint (6), text rendering (5), hardware and screen (5). Medium: user agent, client hints, codecs, CSS features, JS engine, speech voices (3-4). Low: IP address (1), locale formatting (2), and the connection-dependent request shape and JA4 (3). Tests without an entry use a category weight (static 2, configuration 1.5, behavioral 3).
+- **Per-component similarity**: lists (fonts, languages, codecs) are compared as sets, so one added font costs a fraction rather than everything; objects are compared key by key; hashes and strings match exactly or not at all.
+- **Not penalised**: a component that is missing, errored or in a state that depends on permissions (`unavailable`, `failed`) on either side is skipped and left out of the average, so a run without network data does not look like a different device. `coverage` is the share of the total weight that could be compared; read a score with low coverage with care. A test that is `unsupported` on both sides counts as a match.
+- **Ignored on purpose**: window state (orientation, display mode), audio latencies and state, timing, timestamps, location, permissions and battery.
+- **Verdicts**: 99.5% and up Identical, 90% Very similar, 70% Similar, 40% Partly similar, below that Different.
+- The result lists every component with its weight, similarity and what changed (for lists, how many items were added and removed), plus a score per group (browser, display, hardware, GPU, audio, canvas and fonts, engine, advanced tests, network). Signals within a group such as the GPU move together, so one real change can lower several components at once.
+- The score is a similarity aid, not proof of identity: the same device scores below 100% after a browser, driver or OS update, and different devices with the same hardware and software can score very high.
+
+On `/history`, the newest-vs-previous comparison is shown at the top, and ticking any two entries and pressing **Compare selected** shows the same breakdown for them.
+Each row stores the complete payload as JSONB plus `combinedHash`, `staticHash`, `configurationHash`, `behavioralHash` and `schemaVersion` (the `characteristics.schema` value) as indexed columns, extracted by `lib/fingerprint-store.js`. Rows are deleted with the account (`onDelete: Cascade`). The payload includes the IP address, headers and any WebRTC addresses collected in that run, so saved rows are personal data: delete them from the history page when you no longer need them.
+
 ### Static assets
 
 Files under `/src/...` are looked up first in `resources/public/`, then in `resources/private/` (which requires login). Anything else under `/src` returns 404. In HTML, always reference assets with a `/src` prefix:
@@ -213,13 +248,14 @@ Files under `/src/...` are looked up first in `resources/public/`, then in `reso
 
 ## Fingerprint Test Page
 
-`GET /fingerprint` serves a page that collects browser, device and network characteristics and shows them as JSON. Everything is collected in the browser. The server only reports what it sees in the request itself (via `/fingerprint/info`); the collected results are never sent to it and nothing is stored in the database. The request logger in `routes/middleware.js` still prints each request's method, URL and IP to the console, as it does for every route.
+`GET /fingerprint` serves a page that collects browser, device and network characteristics and shows them as JSON. Everything is collected in the browser. The server only reports what it sees in the request itself (via `/fingerprint/info`). The collected results stay in the browser unless the user presses **Save to my account**, which sends them to `POST /fingerprint/saved` (see Saved fingerprints API) and stores them against the account. The request logger in `routes/middleware.js` still prints each request's method, URL and IP to the console, as it does for every route.
 
 - `images/authenticated/fingerprint.html` is the page.
 - `resources/private/fingerprint-lib.js` holds the collectors and exposes `runFingerprint(options)` and `FINGERPRINT_WARNING`.
 - `routes/fingerprint.js` provides `GET /fingerprint/info` (see Fingerprint API above).
 - `resources/private/fingerprint-wasm.js`, `fingerprint-media.js`, `fingerprint-text.js` and `fingerprint-env.js` hold the newer tests (see "Tests, statuses and characteristics"). They are loaded after `fingerprint-lib.js` and register their tests with it.
-- `resources/private/fingerprint.js` wires the page's checkboxes and button to the library.
+- `resources/private/fingerprint.js` wires the page's checkboxes and buttons to the library, including saving the result.
+- `images/authenticated/history.html`, `resources/private/history.js` and `history.css` are the saved-fingerprints page.
 - `resources/private/fingerprint.css` adds the layout on top of `style.css`.
 
 `runFingerprint({ consent: true })` throws unless `consent` is exactly `true`, so only pass it after the user has seen `FINGERPRINT_WARNING`. Options:
@@ -308,7 +344,7 @@ Run `npm test` for the checks that need no browser (hashing, serialization, stat
 
 ## Database
 
-Prisma is configured in `prisma7.config.ts`, which points at `prisma/schema.prisma` and `prisma/migrations`. The included schema has a single model:
+Prisma is configured in `prisma7.config.ts`, which points at `prisma/schema.prisma` and `prisma/migrations`. The included schema has two models, `User` and `BrowserFingerprint` (a user's saved fingerprints, see above). `User` looks like this:
 
 ```prisma
 model User {

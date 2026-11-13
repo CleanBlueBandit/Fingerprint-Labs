@@ -44,6 +44,10 @@ router.get("/fingerprint", authenticate, (req, res) => {
     res.sendFile(sendPrivate("fingerprint.html"));
 })
 
+router.get("/history", authenticate, (req, res) => {
+    res.sendFile(sendPrivate("history.html"));
+})
+
 router.get("/coffee", (req, res) => {
     return respondWithStatusCode(418, res);
 })

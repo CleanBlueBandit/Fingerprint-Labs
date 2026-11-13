@@ -3,11 +3,22 @@ import net from 'node:net';
 import { createHash } from 'node:crypto';
 import { getTlsFingerprint } from '../lib/tls-fingerprint.js';
 import rateLimit from 'express-rate-limit';
+import prisma from '../db/prisma.js';
+import { compareFingerprints } from '../lib/fingerprint-compare.js';
+import {
+    MAX_SAVED_PER_USER,
+    extractHashes,
+    isPlainObject,
+    sanitizeData,
+    toSummary
+} from '../lib/fingerprint-store.js';
 
 const router = Router();
 
-// Everything returned here describes the caller's own request and is sent
-// back only to that caller. Nothing is stored or logged by this router.
+// GET /fingerprint/info describes the caller's own request and is sent back only to that
+// caller; it stores nothing. Saving is separate and explicit: POST /fingerprint/saved stores a
+// result the user chose to save, against their own account, and the /saved routes only ever
+// read or delete rows that belong to the logged-in user.
 
 const limiter = rateLimit({
     windowMs: 60 * 1000,
@@ -254,6 +265,211 @@ function tlsNoteFor(socket, headers) {
         + 'Start it with TLS_KEY_FILE and TLS_CERT_FILE to compute JA3/JA4 itself, '
         + 'or forward them from your proxy or CDN (see groups.tlsProxy).';
 }
+
+function requireLogin(req, res, next) {
+    if (!req.session?.userId) {
+        return res.status(401).json({ ok: false, message: 'Not logged in' });
+    }
+    next();
+}
+
+const saveLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 10,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    message: { ok: false, message: 'Too many requests, try again later' }
+});
+
+const readLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 60,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    message: { ok: false, message: 'Too many requests, try again later' }
+});
+
+const NEWEST_FIRST = [{ createdAt: 'desc' }, { id: 'desc' }];
+
+const meta = (row) => ({ id: row.id, createdAt: row.createdAt });
+
+// Comparison result without the payloads, plus which two rows were compared
+function compareRows(a, b) {
+    return { ...compareFingerprints(a.data, b.data), a: meta(a), b: meta(b) };
+}
+
+function parseId(value) {
+    return /^\d{1,9}$/.test(value) ? Number(value) : null;
+}
+
+// Save a fingerprint result to the logged-in user's account
+router.post('/saved', saveLimiter, requireLogin, async (req, res, next) => {
+    try {
+        const data = req.body?.data;
+        if (!isPlainObject(data) || Object.keys(data).length === 0) {
+            return res.status(400).json({ ok: false, message: 'Missing fingerprint data' });
+        }
+
+        const userId = req.session.userId;
+
+        const count = await prisma.browserFingerprint.count({ where: { userId } });
+        if (count >= MAX_SAVED_PER_USER) {
+            return res.status(409).json({
+                ok: false,
+                message: `You can keep up to ${MAX_SAVED_PER_USER} saved fingerprints. Delete some to save more.`
+            });
+        }
+
+        // The previous newest one, read before this save so the new row is not compared to itself
+        const previous = await prisma.browserFingerprint.findFirst({
+            where: { userId },
+            orderBy: NEWEST_FIRST
+        });
+
+        const row = await prisma.browserFingerprint.create({
+            data: { userId, data: sanitizeData(data), ...extractHashes(data) }
+        });
+
+        // A comparison that fails must not fail the save
+        let comparison = null;
+        if (previous) {
+            try {
+                comparison = compareRows(row, previous);
+            } catch (err) {
+                console.error('Fingerprint comparison failed:', err);
+            }
+        }
+
+        res.status(201).json({
+            ok: true,
+            message: 'Fingerprint saved',
+            fingerprint: toSummary(row),
+            comparison
+        });
+    } catch (err) {
+        // A user that was deleted while the session was still alive
+        if (err.code === 'P2003') {
+            return res.status(401).json({ ok: false, message: 'User not found' });
+        }
+        next(err);
+    }
+});
+
+// List the logged-in user's saved fingerprints, newest first (hashes only, no payload)
+router.get('/saved', readLimiter, requireLogin, async (req, res, next) => {
+    try {
+        const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 100);
+        const cursor = parseId(String(req.query.cursor ?? ''));
+
+        const rows = await prisma.browserFingerprint.findMany({
+            where: { userId: req.session.userId },
+            orderBy: NEWEST_FIRST,
+            take: limit + 1,
+            ...(cursor ? { cursor: { id: cursor }, skip: 0 } : {}),
+            select: {
+                id: true,
+                createdAt: true,
+                combinedHash: true,
+                staticHash: true,
+                configurationHash: true,
+                behavioralHash: true,
+                schemaVersion: true
+            }
+        });
+
+        const hasMore = rows.length > limit;
+        const page = hasMore ? rows.slice(0, limit) : rows;
+
+        res.set('Cache-Control', 'no-store');
+        res.json({
+            ok: true,
+            fingerprints: page.map(toSummary),
+            nextCursor: hasMore ? rows[limit].id : null
+        });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// How similar the newest saved fingerprint is to the one saved before it
+router.get('/saved/compare/latest', readLimiter, requireLogin, async (req, res, next) => {
+    try {
+        const rows = await prisma.browserFingerprint.findMany({
+            where: { userId: req.session.userId },
+            orderBy: NEWEST_FIRST,
+            take: 2
+        });
+
+        res.set('Cache-Control', 'no-store');
+        if (rows.length < 2) {
+            return res.json({ ok: true, comparison: null, saved: rows.length });
+        }
+        res.json({ ok: true, comparison: compareRows(rows[0], rows[1]), saved: rows.length });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// Compare any two of the user's saved fingerprints: ?a=<id>&b=<id>
+router.get('/saved/compare', readLimiter, requireLogin, async (req, res, next) => {
+    try {
+        const a = parseId(String(req.query.a ?? ''));
+        const b = parseId(String(req.query.b ?? ''));
+        if (a === null || b === null) {
+            return res.status(400).json({ ok: false, message: 'Pass two ids as ?a=<id>&b=<id>' });
+        }
+        if (a === b) {
+            return res.status(400).json({ ok: false, message: 'Pick two different fingerprints' });
+        }
+
+        const userId = req.session.userId;
+        const [rowA, rowB] = await Promise.all([
+            prisma.browserFingerprint.findFirst({ where: { id: a, userId } }),
+            prisma.browserFingerprint.findFirst({ where: { id: b, userId } })
+        ]);
+        if (!rowA || !rowB) return res.status(404).json({ ok: false, message: 'Not found' });
+
+        res.set('Cache-Control', 'no-store');
+        res.json({ ok: true, comparison: compareRows(rowA, rowB) });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// One saved fingerprint including the full payload
+router.get('/saved/:id', readLimiter, requireLogin, async (req, res, next) => {
+    try {
+        const id = parseId(req.params.id);
+        if (id === null) return res.status(400).json({ ok: false, message: 'Invalid id' });
+
+        // userId in the filter is what keeps one user from reading another's rows
+        const row = await prisma.browserFingerprint.findFirst({
+            where: { id, userId: req.session.userId }
+        });
+        if (!row) return res.status(404).json({ ok: false, message: 'Not found' });
+
+        res.set('Cache-Control', 'no-store');
+        res.json({ ok: true, fingerprint: { ...toSummary(row), data: row.data } });
+    } catch (err) {
+        next(err);
+    }
+});
+
+router.delete('/saved/:id', readLimiter, requireLogin, async (req, res, next) => {
+    try {
+        const id = parseId(req.params.id);
+        if (id === null) return res.status(400).json({ ok: false, message: 'Invalid id' });
+
+        const { count } = await prisma.browserFingerprint.deleteMany({
+            where: { id, userId: req.session.userId }
+        });
+        if (count === 0) return res.status(404).json({ ok: false, message: 'Not found' });
+
+        res.json({ ok: true, message: 'Deleted' });
+    } catch (err) {
+        next(err);
+    }
+});
 
 router.get('/info', limiter, (req, res) => {
     const socket = req.socket;

@@ -16,7 +16,7 @@ This test collects technical and potentially identifying data from your browser,
   - when this server terminates TLS itself, the TLS handshake your browser sent (JA3/JA4)
   - installed plugins, connected media devices (types and counts), permission states, storage and battery status
   - optionally, your precise location (only if you opt in AND approve the browser prompt)
-Results are shown in your browser and this script does not store or upload them. The server you are connected to sees your IP address and request headers when you run the test, and the WebRTC test contacts a third-party STUN server.
+Results are shown in your browser and are not uploaded unless you press "Save to my account", which stores the full result against your account on this server until you delete it. The server you are connected to sees your IP address and request headers when you run the test, and the WebRTC test contacts a third-party STUN server.
 Combined, this data can identify you. Do not share the raw results publicly.`;
 window.FINGERPRINT_WARNING = FINGERPRINT_WARNING;
 

@@ -1,0 +1,184 @@
+.hist-list {
+    list-style: none;
+    margin: 1rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.hist-item {
+    padding: 0.9rem 1rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+.hist-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.hist-date {
+    font-weight: 600;
+}
+
+.hist-id {
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+
+.hist-hashes {
+    display: grid;
+    grid-template-columns: max-content 1fr max-content;
+    align-items: center;
+    gap: 0.35rem 0.75rem;
+    margin: 0.75rem 0 0;
+    font-size: 0.85rem;
+}
+
+.hist-hashes dt {
+    margin: 0;
+    color: var(--muted);
+}
+
+.hist-hashes dd {
+    margin: 0;
+    min-width: 0;
+    font: 0.8rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    overflow-wrap: anywhere;
+}
+
+.hist-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+}
+
+.hist-item button {
+    margin-top: 0;
+    padding: 0.3rem 0.65rem;
+    font-size: 0.85rem;
+}
+
+.hist-details {
+    margin: 0.75rem 0 0;
+    padding: 0.75rem;
+    max-height: 50vh;
+    overflow: auto;
+    font: 0.75rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+button.danger {
+    color: var(--danger);
+}
+
+#more {
+    margin-top: 1rem;
+}
+
+.hist-pick {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin: 0;
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+
+.hist-pick input {
+    margin: 0;
+}
+
+.cmp-box {
+    margin: 1rem 0 0;
+    padding: 1rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+.cmp-box h2 {
+    margin: 0 0 0.5rem;
+    font-size: 1.1rem;
+}
+
+.cmp-box h3 {
+    margin: 1rem 0 0.4rem;
+    font-size: 0.95rem;
+}
+
+.cmp-score {
+    margin: 0 0 0.25rem;
+    font-size: 1.4rem;
+    font-weight: 700;
+}
+
+.cmp-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 1rem;
+}
+
+.cmp-toolbar button {
+    margin-top: 0;
+}
+
+.cmp-toolbar .muted {
+    margin: 0;
+}
+
+.cmp-groups,
+.cmp-diff {
+    margin: 0.5rem 0 0;
+    padding-left: 1.1rem;
+    font-size: 0.9rem;
+}
+
+.cmp-changed {
+    color: var(--muted);
+    font: 0.75rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    overflow-wrap: anywhere;
+}
+
+.cmp-all {
+    margin-top: 1rem;
+    font-size: 0.85rem;
+}
+
+.cmp-all summary {
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.cmp-table {
+    width: 100%;
+    margin-top: 0.5rem;
+    border-collapse: collapse;
+}
+
+.cmp-table th,
+.cmp-table td {
+    padding: 0.25rem 0.5rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+
+.cmp-skipped {
+    color: var(--muted);
+}
+
+.cmp-different td:last-child {
+    color: var(--danger);
+}

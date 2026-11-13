@@ -31,7 +31,12 @@
             Include details of every connected screen (your browser may ask for permission)
         </label>
 
-        <button id="start" type="button" disabled>Start fingerprint</button>
+        <div class="actions">
+            <button id="start" type="button" disabled>Start fingerprint</button>
+            <button id="save" type="button" class="secondary" hidden disabled>Save to my account</button>
+            <a class="button secondary" href="/history">My saved fingerprints</a>
+            <a class="button secondary" href="/dashboard">Dashboard</a>
+        </div>
         <p id="status" class="fp-status" role="status"></p>
         <pre id="out" class="fp-output"></pre>
     </main>

@@ -17,6 +17,7 @@ import srcRouter from './routes/resources.js';
 import { requestLogger } from './routes/middleware.js';
 import prisma from './db/prisma.js';
 import { createTlsFingerprintingServer } from './lib/tls-fingerprint.js';
+import { MAX_PAYLOAD_BYTES } from './lib/fingerprint-store.js';
 
 //#region Setup
 const __filename = fileURLToPath(import.meta.url);
@@ -56,6 +57,9 @@ const sessionStore = new PgSession({
 
 //#region Middleware
 app.use(requestLogger);
+// A full fingerprint result is far bigger than the 100kb default. body-parser skips a request
+// that was already parsed, so this has to come before the global parser below.
+app.use('/fingerprint/saved', express.json({ limit: MAX_PAYLOAD_BYTES }));
 app.use(express.json());
 app.use(cookieParser());
 
