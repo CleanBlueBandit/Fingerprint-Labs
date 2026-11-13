@@ -61,9 +61,6 @@ DATABASE_URL=postgresql://USER:PASSWORD@localhost:5432/DBNAME
 # Sessions: use a long random string
 SESSION_SECRET=change-me-to-a-long-random-string
 
-# Optional: terminate TLS in this process so it can compute JA3/JA4 (see "TLS fingerprints")
-# TLS_KEY_FILE=./certs/key.pem
-# TLS_CERT_FILE=./certs/cert.pem
 ```
 
 | Variable | Purpose |
@@ -72,7 +69,6 @@ SESSION_SECRET=change-me-to-a-long-random-string
 | `NODE_ENV` | Set to `production` to enable `secure` cookies (requires HTTPS) |
 | `DATABASE_URL` | Postgres connection string, used by Prisma and the session store |
 | `SESSION_SECRET` | Secret used to sign the session cookie |
-| `TLS_KEY_FILE`, `TLS_CERT_FILE` | Optional. Paths to a PEM private key and certificate. When both are set the server speaks HTTPS itself and fingerprints every TLS handshake (set `PROTOCOL=https` too). Leave unset to serve plain HTTP, for example behind a proxy that terminates TLS. |
 | `FP_CROSS_ORIGIN_ISOLATION` | Optional. Set to `1` to send COOP/COEP with `/fingerprint` so thread tests can run. |
 
 Generate a good secret with:
@@ -121,7 +117,7 @@ node server.js
 ├── lib/
 │   ├── fingerprint-compare.js # Weighted similarity between two saved fingerprints
 │   ├── fingerprint-store.js # Hash extraction and payload sanitising for saved fingerprints
-│   └── tls-fingerprint.js   # TLS ClientHello parser, JA3/JA4, and the TCP wrapper that captures them
+│   └── tls-fingerprint.js   # Reads and validates the JA3/JA4 headers Vercel sends
 ├── routes/
 │   ├── auth.js              # POST /auth/register, /auth/login, /auth/logout; GET /auth/me
 │   ├── pages.js             # HTML page routes (/, /login, /register, /dashboard, /fingerprint, /coffee)
@@ -181,9 +177,9 @@ The response is sent only to the caller and nothing is stored. It contains:
 
 - `ip`: the address Express resolves (`client`, honouring `trust proxy`), the trusted `X-Forwarded-For` entries (`forwardedChain`) and the raw TCP peer (`socket`, with port and family). Each address has its IP version and a class (`public`, `private`, `loopback`, `link-local`, `carrier-grade-nat`, and so on). IPv4-mapped IPv6 addresses are unwrapped.
 - `http`: HTTP version, method, protocol, host, hostname, original URL, full path, query, subdomains, `xhr`.
-- `tls`: protocol, cipher, ALPN and server name, only when Node itself terminates TLS (otherwise `null`).
+- `tls`: protocol, cipher, ALPN and server name of the socket Node sees. This is `null` behind Vercel, because TLS ends at Vercel's edge; see `tlsFingerprint` for the client's handshake.
 - `headers`, `headerOrder`, `headerCount`: every header received, plus the original names, casing and order. Credential headers (`authorization`, `proxy-authorization`, `x-api-key`, `x-auth-token`) are redacted and `cookie` is left out.
-- `groups`: the same headers sorted into `proxy`, `clientHints`, `preferenceHints` (`Sec-CH-Prefers-*`, a subset of `clientHints`), `fetchMetadata`, `signals` (DNT, Sec-GPC, Save-Data, Priority and similar) and `tlsProxy` (JA3/JA4 headers forwarded by a proxy, see the TLS note below).
+- `groups`: the same headers sorted into `proxy`, `clientHints`, `preferenceHints` (`Sec-CH-Prefers-*`, a subset of `clientHints`), `fetchMetadata`, `signals` (DNT, Sec-GPC, Save-Data, Priority and similar) and `tlsProxy` (the `x-vercel-ja4-digest` / `x-vercel-ja3-digest` headers, see the TLS note below).
 - `parsed`: `Accept-Language` with q-values, `Accept-Encoding` and `Accept` as lists; `acceptDetail` (Accept with q-values) and `acceptRaw`; `doNotTrack` and `globalPrivacyControl`; and `fetchMetadata` (`Sec-Fetch-Site/Mode/Dest/User`).
 - `signature`: short SHA-256 hashes of the header order (as sent and lowercased), `Accept`, `Accept-Encoding` and `Accept-Language`, for comparing the request's shape across runs.
 - `http` also has `versionMajor`/`versionMinor`, `alpnProtocol` (only when Node terminates TLS), `viaHops` (versions reported by proxies in `Via`), `priority` and `connection`. Behind a proxy, `version` is the proxy-to-app hop, not what the browser used.
@@ -192,20 +188,29 @@ The response is sent only to the caller and nothing is stored. It contains:
 
 The `/fingerprint` page response and the `/fingerprint/info` response both include an `Accept-CH` header asking Chromium browsers to send extra client hints on later requests (browsers only act on it from page navigations, so the page response is the one that matters): CPU architecture, bitness, full version list, platform version, model, form factors, WoW64, the `Sec-CH-Prefers-*` preferences (colour scheme, reduced motion, reduced transparency, contrast), forced colours, device memory, DPR, viewport and width hints, and the network hints `ECT`, `RTT`, `Downlink` and `Save-Data`. Browsers ignore tokens they don't support. This only works on HTTPS or `localhost`, and the browser then keeps sending them to this origin for the session. The client calls the endpoint a second time when it sees `Accept-CH`, so those headers show up in the result.
 
-**TLS fingerprints (JA3/JA4).** The response has a `tlsFingerprint` object with `source`, `trusted`, `ja3`, `ja3Hash`, `ja4`, `ja4Raw` and a decoded `clientHello` (SNI, ALPN, supported versions, cipher suites, extension order, groups, signature algorithms, whether GREASE and ECH were seen). There are three cases:
+**TLS fingerprints (JA3/JA4).** Node can't see the TLS ClientHello when TLS ends at Vercel's edge, so this project doesn't compute fingerprints itself. Vercel computes them for every request (all plans) and passes them to the deployment as headers, which `lib/tls-fingerprint.js` validates and decodes ([Vercel docs](https://vercel.com/docs/vercel-firewall/firewall-concepts)):
 
-1. **Node terminates TLS (`source: "node"`, `trusted: true`).** Node's TLS API doesn't expose the ClientHello, so `lib/tls-fingerprint.js` listens on a plain TCP socket, reads the first TLS record, computes the fingerprints, then replays the bytes to the HTTPS server so the handshake continues normally. Express finds the result by the connection's remote address and port. Enable it by setting `TLS_KEY_FILE` and `TLS_CERT_FILE` and `PROTOCOL=https`. For local testing:
+| Header | Value |
+|---|---|
+| `x-vercel-ja4-digest` | JA4 fingerprint (preferred) |
+| `x-vercel-ja3-digest` | JA3 fingerprint |
 
-   ```bash
-   mkdir certs && openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/key.pem -out certs/cert.pem \
-     -days 30 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
-   ```
+The response has a `tlsFingerprint` object:
 
-   It handles ClientHellos split across several TCP segments, and non-TLS traffic on the TLS port is passed to the HTTPS server, which rejects it as usual. It sees TCP only, so QUIC/HTTP3 handshakes (JA4 `q...`) are not covered, and a ClientHello split across multiple TLS records is not parsed.
-2. **A proxy or CDN terminates TLS (`source: "proxy-headers"`, `trusted: false`).** Node never sees the handshake, so the proxy has to compute JA3/JA4 and forward them as headers. Any of `cf-ja3-hash`, `cf-ja4`, `x-ja3`, `x-ja3-hash`, `x-ja4`, `x-ja4-hash`, `x-tls-ja3`, `x-tls-ja4`, `ssl-ja3` or `x-ssl-ja3` is reported (also under `groups.tlsProxy`). Some CDNs expose JA3/JA4 to their rules or workers, which can copy them into a header; check your provider's docs and make sure it strips these headers from incoming requests, because any client can send them.
-3. **Plain HTTP with nothing forwarded (`source: null`).** `tlsNote` explains why.
+- `source`: `"vercel"` when at least one well-formed digest was present, otherwise `null`.
+- `trusted`: `true` when running on Vercel (`VERCEL=1`), `false` anywhere else, `null` when there is nothing to report. Off Vercel nothing strips these headers from incoming requests, so a client can send any value it likes; `tlsNote` says so.
+- `ja4`, `ja3`: the digests, lowercased. A malformed value is dropped rather than passed through.
+- `ja4Parts`: the readable part of the JA4 decoded: `protocol` (tcp/quic/dtls), `tlsVersion`, `sni`, `cipherCount`, `extensionCount`, `alpn`, plus the `cipherHash` and `extensionHash`.
 
-JA3 is the MD5 of `version,ciphers,extensions,groups,pointFormats` with GREASE removed. Chromium shuffles the extension order on each connection, so its JA3 changes between connections; JA4 sorts ciphers and extensions, so it stays stable. The JA4 code was checked against the published Chrome values (cipher hash `8daaf6152771`, extension hash `e5627efa2ab1`), and the JA3 code against the JA3 project's sample vector.
+The raw ClientHello (cipher list, extension order, groups, GREASE/ECH flags) and the JA3/JA4 pre-hash strings are not available any more, because Vercel only exposes the digests.
+
+To try it locally without Vercel, send the header yourself; it is reported with `trusted: false`:
+
+```bash
+curl -H 'x-vercel-ja4-digest: t13d1516h2_8daaf6152771_02713d6af862' http://localhost:3000/fingerprint/info
+```
+
+Treat the fingerprint as one weak signal. It identifies a TLS client configuration, not a person: users on the same browser build share it, and Vercel's own guidance warns against identifying or blocking someone on a JA4 hash alone. People have reported identical Chrome JA4 values across different countries for exactly this reason. That is why the similarity score gives it a low weight and keeps it out of `combinedHash`. Chromium also shuffles TLS extension order per connection, so JA3 varies between connections while JA4 stays stable.
 
 ### Saved fingerprints API
 

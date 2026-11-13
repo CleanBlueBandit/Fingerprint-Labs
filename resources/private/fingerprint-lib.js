@@ -13,7 +13,7 @@ This test collects technical and potentially identifying data from your browser,
   - how your audio engine renders a test tone, how your GPU renders a WebGL test scene, and which fonts render glyphs in several scripts
   - WebAssembly, WebCodecs and MediaCapabilities support (including hardware decoding hints), device and sensor API availability, and how IndexedDB, Cache, compression, RegExp, Intl and date functions behave
   - optionally, details of every connected screen (only if you opt in AND approve the browser prompt)
-  - when this server terminates TLS itself, the TLS handshake your browser sent (JA3/JA4)
+  - the JA3/JA4 fingerprint of your TLS handshake, when this server runs on Vercel (Vercel's edge computes it)
   - installed plugins, connected media devices (types and counts), permission states, storage and battery status
   - optionally, your precise location (only if you opt in AND approve the browser prompt)
 Results are shown in your browser and are not uploaded unless you press "Save to my account", which stores the full result against your account on this server until you delete it. The server you are connected to sees your IP address and request headers when you run the test, and the WebRTC test contacts a third-party STUN server.

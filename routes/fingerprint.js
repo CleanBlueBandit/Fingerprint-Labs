@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import net from 'node:net';
 import { createHash } from 'node:crypto';
-import { getTlsFingerprint } from '../lib/tls-fingerprint.js';
+import { TLS_FINGERPRINT_HEADERS, readTlsFingerprint, tlsNoteFor } from '../lib/tls-fingerprint.js';
 import rateLimit from 'express-rate-limit';
 import prisma from '../db/prisma.js';
 import { compareFingerprints } from '../lib/fingerprint-compare.js';
@@ -104,27 +104,6 @@ const MISC_SIGNAL_HEADERS = new Set([
     'ect',
     'rtt',
     'downlink'
-]);
-
-// JA3 / JA4 TLS fingerprints are only visible to whatever terminates TLS. If a
-// proxy or CDN computes them and forwards them as headers, they are reported
-// here. They are NOT trustworthy unless your proxy strips these headers from
-// incoming requests first, because any client can send them.
-const TLS_FINGERPRINT_HEADERS = new Set([
-    'cf-ja3-hash',
-    'cf-ja4',
-    'x-ja3',
-    'x-ja3-hash',
-    'x-ja4',
-    'x-ja4-hash',
-    'x-tls-ja3',
-    'x-tls-ja4',
-    'ssl-ja3',
-    'x-ssl-ja3',
-    'x-ssl-protocol',
-    'x-ssl-cipher',
-    'x-tls-version',
-    'x-tls-cipher'
 ]);
 
 // IP classification
@@ -233,37 +212,6 @@ function pickHeaders(headers, predicate) {
     return Object.fromEntries(
         Object.entries(headers).filter(([name]) => predicate(name))
     );
-}
-
-function describeTlsFingerprint(socket, headers) {
-    const measured = getTlsFingerprint(socket);
-    if (measured) {
-        return { source: 'node', trusted: true, ...measured };
-    }
-
-    const forwarded = pickHeaders(headers, (name) => TLS_FINGERPRINT_HEADERS.has(name));
-    if (Object.keys(forwarded).length) {
-        return { source: 'proxy-headers', trusted: false, headers: forwarded };
-    }
-
-    return { source: null, trusted: null, ja3: null, ja4: null };
-}
-
-function tlsNoteFor(socket, headers) {
-    if (getTlsFingerprint(socket)) return null;
-
-    if (Object.keys(pickHeaders(headers, (name) => TLS_FINGERPRINT_HEADERS.has(name))).length) {
-        return 'These values were forwarded by a proxy in request headers and are not verified. '
-            + 'Anyone can send the same headers unless the proxy strips them from incoming requests.';
-    }
-
-    if (socket.encrypted) {
-        return 'TLS ends at this server, but this connection\'s handshake was not captured.';
-    }
-
-    return 'Node is not terminating TLS here, so it cannot see the client handshake. '
-        + 'Start it with TLS_KEY_FILE and TLS_CERT_FILE to compute JA3/JA4 itself, '
-        + 'or forward them from your proxy or CDN (see groups.tlsProxy).';
 }
 
 function requireLogin(req, res, next) {
@@ -485,6 +433,8 @@ router.get('/info', limiter, (req, res) => {
     // Original header names, casing and order (differs between browsers)
     const headerOrder = req.rawHeaders.filter((_, index) => index % 2 === 0);
 
+    const tlsFingerprint = readTlsFingerprint(req.headers);
+
     const tls = socket.encrypted
         ? {
             protocol: socket.getProtocol?.() ?? null,
@@ -542,12 +492,10 @@ router.get('/info', limiter, (req, res) => {
 
         tls,
 
-        // JA3/JA4 of the TLS handshake. Computed by this server when it terminates TLS
-        // itself (TLS_KEY_FILE and TLS_CERT_FILE set), otherwise whatever a proxy or CDN
-        // in front of it forwards in headers, which can be spoofed unless the proxy
-        // strips those headers from incoming requests.
-        tlsFingerprint: describeTlsFingerprint(socket, headers),
-        tlsNote: tlsNoteFor(socket, headers),
+        // JA3/JA4 of the TLS handshake, as computed by Vercel's edge and passed in the
+        // x-vercel-ja4-digest / x-vercel-ja3-digest headers (see lib/tls-fingerprint.js)
+        tlsFingerprint,
+        tlsNote: tlsNoteFor(tlsFingerprint),
 
         headers,
         headerOrder,
@@ -560,7 +508,7 @@ router.get('/info', limiter, (req, res) => {
             preferenceHints: pickHeaders(headers, (name) => name.startsWith('sec-ch-prefers-')),
             fetchMetadata: pickHeaders(headers, (name) => name.startsWith('sec-fetch-')),
             signals: pickHeaders(headers, (name) => MISC_SIGNAL_HEADERS.has(name)),
-            // Only populated when a proxy in front of Express computes and forwards them
+            // The x-vercel-ja4-digest / x-vercel-ja3-digest headers, when present
             tlsProxy: pickHeaders(headers, (name) => TLS_FINGERPRINT_HEADERS.has(name))
         },
 
