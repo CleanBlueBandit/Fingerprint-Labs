@@ -10,7 +10,8 @@
     "test": "node --test tests/*.test.mjs",
     "contract:emit": "prisma contract emit",
     "dev": "nodemon server.js",
-    "prisma:bundle": "npx --yes esbuild generated/prisma/client.ts --bundle --format=esm --platform=node --packages=external --outfile=generated/prisma-client.mjs"    "build": "prisma generate --config prisma7.config.ts && npm run prisma:bundle",
+    "prisma:bundle": "npx --yes esbuild generated/prisma/client.ts --bundle --format=esm --platform=node --packages=external --outfile=generated/prisma-client.mjs" ,
+    "build": "prisma generate --config prisma7.config.ts && npm run prisma:bundle",
     "postinstall": "prisma generate --config prisma7.config.ts && npm run prisma:bundle"
   },
   "dependencies": {
